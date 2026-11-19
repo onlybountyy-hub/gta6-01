@@ -1,156 +1,137 @@
-// police.js — the Port Solano Police Department and the wanted system.
+// police.js — the wanted system and police pursuit AI for SOLANO HEAT.
 //
-// Crimes add heat; heat becomes stars; stars decide how many cruisers hunt the
-// player. Cruisers spawn on roads a few blocks out, pursue at a speed matched
-// to the chase, reverse out of overshoots, and try to keep the player slow and
-// close — which is exactly what fills the bust meter. Break line of sight for
-// long enough and the heat bleeds away, star by star.
+// Wanted level is a float underneath the displayed stars: crimes add heat,
+// heat decays slowly when no officer can see the player, and the star
+// count is the ceiling of the heat clamped to 0..5. Each star wants one
+// police car on the street (two at the top end); cars spawn at a distance
+// on the road grid and drive at the player's position, ramming to slow
+// them. When an officer is close and the player is slow or on foot, the
+// bust meter fills; filling it ends the run with a fine. Reaching the
+// spray shop with enough cash clears all heat instantly.
 
-import { WANTED_THRESHOLDS, POLICE_PER_STAR, PLACES } from './config.js';
-import { S } from './state.js';
-import { spawnVehicle, removeVehicle, steerToward, approachSpeed, forwardOf } from './vehicles.js';
-import { hitPedestrian } from './pedestrians.js';
-import { updateSiren } from './audio.js';
+import { clamp, distance2d, headingTowards, angleDelta } from './rng.js';
+import { createCar, stepCar } from './vehicles.js';
 
-/** The star count a heat total earns. */
-export function starsForHeat(heat) {
-  let stars = 0;
-  for (let i = 1; i < WANTED_THRESHOLDS.length; i += 1) {
-    if (heat >= WANTED_THRESHOLDS[i]) stars = i;
-  }
-  return stars;
-}
+const CRIME_HEAT = {
+  theft: 1.0,
+  assault: 1.0,
+  shot: 0.6,
+  murder: 1.6,
+  crash: 0.25,
+  policeHit: 1.2,
+};
 
-/** Full reset: hospital respawns, busts and mission scripts start clean. */
-export function clearWanted() {
-  S.wanted.heat = 0;
-  S.wanted.stars = 0;
-  S.wanted.bustProgress = 0;
-  for (const v of [...S.vehicles]) {
-    if (v.ai && v.ai.role === 'police') removeVehicle(v);
-  }
-}
+export function createPoliceSystem(scene) {
+  return {
+    scene,
+    heat: 0,
+    stars: 0,
+    cars: [],
+    bust: 0,
+    busted: false,
+    decayTimer: 0,
+    spawnTimer: 0,
+    crimeLog: [],
 
-/** Force an exact star level (mission scripts set the heat of the moment). */
-export function setWantedStars(stars) {
-  const clamped = Math.max(0, Math.min(5, stars));
-  S.wanted.heat = WANTED_THRESHOLDS[clamped] + 1;
-  S.wanted.lastSeenAt = S.time;
-}
+    reportCrime(kind, pos) {
+      const add = CRIME_HEAT[kind] ?? 0.4;
+      this.heat = clamp(this.heat + add, 0, 5.6);
+      this.crimeLog.push({ kind, at: Date.now() });
+      if (this.crimeLog.length > 40) this.crimeLog.shift();
+    },
 
-/** A road intersection 120–200 m from the player, for a cruiser to roll in from. */
-function spawnPoint() {
-  const p = S.playerPos();
-  const candidates = [];
-  for (const cx of S.roadCenters) {
-    for (const cz of S.roadCenters) {
-      const d = Math.hypot(cx - p.x, cz - p.z);
-      if (d > 120 && d < 200) candidates.push({ x: cx, z: cz });
-    }
-  }
-  if (!candidates.length) return { x: p.x + 150, z: p.z };
-  return candidates[Math.floor(Math.random() * candidates.length)];
-}
+    setWanted(stars) {
+      this.heat = clamp(stars, 0, 5.6);
+    },
 
-function spawnCruiser() {
-  const at = spawnPoint();
-  return spawnVehicle('cruiser', 0x23262b, at.x, at.z, Math.atan2(S.player.x - at.x, S.player.z - at.z), {
-    ai: { role: 'police', wreckTimer: 0 },
-  });
-}
-
-function policeUnits() {
-  return S.vehicles.filter((v) => v.ai && v.ai.role === 'police');
-}
-
-/** Advance the wanted simulation and drive every cruiser one frame. */
-export function updatePolice(dt) {
-  const w = S.wanted;
-  const p = S.playerPos();
-  const units = policeUnits();
-
-  // Eyes on the player: any unit within 70 m keeps the heat from cooling.
-  let nearest = Infinity;
-  for (const u of units) {
-    const d = Math.hypot(u.x - p.x, u.z - p.z);
-    if (d < nearest) nearest = d;
-    if (d < 70 && !u.dead) w.lastSeenAt = S.time;
-  }
-  if (S.time - w.lastSeenAt > 6) {
-    w.heat = Math.max(0, w.heat - dt * 1.15);
-  }
-  const newStars = starsForHeat(w.heat);
-  if (newStars !== w.stars) {
-    if (newStars > w.stars) S.notify(`Wanted level ${'★'.repeat(newStars)}`, 'bad');
-    if (newStars === 0 && w.stars > 0) S.notify('You lost the cops', 'good');
-    w.stars = newStars;
-  }
-
-  // The fleet follows the stars; spare units melt away when the heat dies.
-  const wantedCount = POLICE_PER_STAR[w.stars];
-  const active = units.filter((u) => !u.dead);
-  if (active.length < wantedCount) {
-    spawnCruiser();
-  } else if (active.length > wantedCount) {
-    const far = active.find((u) => Math.hypot(u.x - p.x, u.z - p.z) > 200);
-    if (far) removeVehicle(far);
-  }
-
-  updateSiren(w.stars > 0 && nearest !== Infinity ? Math.max(0, 1 - nearest / 95) * 0.12 : 0);
-
-  // Bust pressure: a close cruiser plus a slow player fills the meter.
-  const playerSpeed = S.playerSpeed();
-  if (w.stars > 0 && nearest < 10.5 && playerSpeed < 2.3 && !S.player.dead) {
-    w.bustProgress = Math.min(1, w.bustProgress + dt / 2.8);
-    if (w.bustProgress >= 1) {
-      S.busted = true;
-      w.bustProgress = 0;
-    }
-  } else {
-    w.bustProgress = Math.max(0, w.bustProgress - dt * 0.55);
-  }
-
-  for (const u of units) {
-    const phase = Math.floor(S.time * 3.4 + u.x) % 2 === 0;
-    if (u.mesh.userData.lightRed) u.mesh.userData.lightRed.visible = phase;
-    if (u.mesh.userData.lightBlue) u.mesh.userData.lightBlue.visible = !phase;
-    if (u.dead) {
-      u.ai.wreckTimer += dt;
-      u.speed = 0;
-      if (u.ai.wreckTimer > 7) removeVehicle(u);
-      continue;
-    }
-    const dist = Math.hypot(p.x - u.x, p.z - u.z);
-    const fwd = forwardOf(u.heading);
-    const dot = dist > 0 ? ((p.x - u.x) * fwd.x + (p.z - u.z) * fwd.z) / dist : 0;
-    let target;
-    if (dist < 8 && dot < -0.25) {
-      // Overshot: back up while swinging around for another run.
-      target = -9;
-      steerToward(u, p.x, p.z, dt, 2.4);
-    } else {
-      steerToward(u, p.x, p.z, dt, 2.1);
-      if (dist > 55) target = u.spec.topSpeed;
-      else if (dist > 16) target = Math.max(playerSpeed + 6, 14);
-      else target = Math.max(playerSpeed + 2.5, 7);
-      // Do not plough through traffic at full tilt.
-      for (const other of S.vehicles) {
-        if (other === u || (other.ai && other.ai.role === 'police')) continue;
-        const ahead = (other.x - u.x) * fwd.x + (other.z - u.z) * fwd.z;
-        const lateral = Math.abs((other.x - u.x) * fwd.z - (other.z - u.z) * fwd.x);
-        if (ahead > 0 && ahead < 9 && lateral < 2.4) target = Math.min(target, Math.max(0, other.speed));
+    clearWanted() {
+      this.heat = 0;
+      this.bust = 0;
+      for (const car of this.cars) {
+        this.scene.remove(car.mesh);
       }
-    }
-    approachSpeed(u, target, dt);
-    if (Math.abs(u.speed) > 3) {
-      for (const ped of S.peds) {
-        if (!ped.dead && Math.hypot(ped.x - u.x, ped.z - u.z) < 1.9) hitPedestrian(ped, u);
-      }
-    }
-  }
-}
+      this.cars = [];
+    },
 
-/** Where a busted player is dropped: outside PSPD Central, poorer and starless. */
-export function bustDropPoint() {
-  return { x: PLACES.policeStation.x + 8, z: PLACES.policeStation.z + 12 };
+    wantedCars() {
+      if (this.stars <= 0) return 0;
+      return Math.min(6, this.stars + (this.stars >= 4 ? 1 : 0));
+    },
+
+    update(dt, player, world, onBusted) {
+      this.stars = this.heat <= 0.05 ? 0 : Math.min(5, Math.ceil(this.heat));
+      // Heat decay: only while no police car is near enough to see us.
+      const seen = this.cars.some((c) => distance2d(c.pos.x, c.pos.z, player.pos.x, player.pos.z) < 55);
+      if (!seen && this.stars > 0) {
+        this.decayTimer += dt;
+        if (this.decayTimer > 6) {
+          this.heat = Math.max(0, this.heat - dt * 0.06);
+        }
+      } else {
+        this.decayTimer = 0;
+      }
+
+      // Spawn to quota, a little away and on a road.
+      this.spawnTimer -= dt;
+      if (this.cars.length < this.wantedCars() && this.spawnTimer <= 0) {
+        this.spawnTimer = 1.4;
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 85;
+        let sx = player.pos.x + Math.sin(angle) * dist;
+        let sz = player.pos.z + Math.cos(angle) * dist;
+        sx = clamp(sx, -300, 300);
+        sz = clamp(sz, -300, 300);
+        // Snap to the nearest road centreline so the car starts on tarmac.
+        sx = Math.round((sx + 286) / 52) * 52 - 286;
+        // At four stars and up, some spawns are interceptors: dark,
+        // spoilered and meaningfully faster than the standard cruiser.
+        // They are the reason the top end of the wanted scale feels
+        // different rather than just more crowded.
+        const interceptor = this.stars >= 4 && Math.random() < 0.45;
+        const car = interceptor
+          ? createCar(this.scene, sx, sz, headingTowards(sx, sz, player.pos.x, player.pos.z), 0x23283b, { police: true, sport: true, topSpeed: 41, accel: 22 })
+          : createCar(this.scene, sx, sz, headingTowards(sx, sz, player.pos.x, player.pos.z), 0xf4f6f6, { police: true, topSpeed: 37, accel: 19 });
+        car.isInterceptor = interceptor;
+        this.cars.push(car);
+      }
+      // Despawn the surplus when heat falls.
+      while (this.cars.length > this.wantedCars() + 1) {
+        const far = this.cars.pop();
+        this.scene.remove(far.mesh);
+      }
+
+      // Pursuit steering: aim at a point a touch ahead of the player.
+      let nearest = Infinity;
+      const playerSpeed = player.car ? Math.abs(player.car.speed) : 0;
+      for (const car of this.cars) {
+        if (car.dead) continue;
+        const d = distance2d(car.pos.x, car.pos.z, player.pos.x, player.pos.z);
+        nearest = Math.min(nearest, d);
+        const lead = clamp(d / 30, 0, 1) * 4;
+        const tx = player.pos.x + Math.sin(player.heading) * lead;
+        const tz = player.pos.z + Math.cos(player.heading) * lead;
+        const wantHeading = headingTowards(car.pos.x, car.pos.z, tx, tz);
+        const delta = angleDelta(car.heading, wantHeading);
+        const steer = clamp(delta * 1.6, -1, 1);
+        const throttle = d > 7 ? 1 : 0.25;
+        stepCar(car, { throttle, steer, brake: d < 5 && playerSpeed < 2 }, dt, world);
+        // Light bar strobe.
+        const bar = car.mesh.getObjectByName('lightbar');
+        if (bar) bar.material.color.setHex(Math.floor(performance.now() / 220) % 2 ? 0xff2222 : 0x2266ff);
+      }
+
+      // Bust logic: close + slow player = the meter fills.
+      const playerSlow = !player.car || Math.abs(player.car.speed) < 3.2;
+      if (this.stars > 0 && nearest < 13 && playerSlow) {
+        this.bust = clamp(this.bust + dt / 3.2, 0, 1);
+      } else {
+        this.bust = clamp(this.bust - dt / 2.4, 0, 1);
+      }
+      if (this.bust >= 1 && !this.busted) {
+        this.busted = true;
+        if (onBusted) onBusted();
+      }
+      return { stars: this.stars, nearest, seen };
+    },
+  };
 }

@@ -1,188 +1,258 @@
-// combat.js — Marco's pistol, and Marco's mortality.
+// combat.js — pistol combat: hitscan shots, tracers, health and death.
 //
-// Holding the right mouse button (or latching with R) draws the gun and turns
-// clicks into shots: a ray from the camera through the crosshair, resolved
-// against pedestrians, vehicles, building boxes and the ground, dressed with a
-// tracer, sparks and a muzzle flash. Every shot is a crime the whole street
-// hears. This module also hurts the player — mostly by being run over — and
-// handles the slow recovery once the shooting stops.
+// The player carries one pistol with infinite reserve ammunition and a
+// twelve-round magazine (R reloads, and it auto-reloads when empty).
+// Firing casts a hitscan ray from the camera through the crosshair: the
+// nearest pedestrian, enemy or car within range takes the hit. Enemies
+// (mission guards) shoot back on a per-enemy cooldown with spread, which
+// is what makes the warehouse fight dangerous. Muzzle flash is a brief
+// point light plus a small sprite plane; tracers are fading line segments
+// kept in a small pool so a firefight never allocates per shot.
 
 import * as THREE from 'three';
-import { CRIME, PLAYER } from './config.js';
-import { S } from './state.js';
-import { keys, mouseDownRight, takeClick } from './input.js';
-import { shootPedestrian, panicAt } from './pedestrians.js';
-import { damageVehicle } from './vehicles.js';
-import { spawnTracer, spawnSparks, spawnParticles, muzzleFlash } from './effects.js';
-import { playGunshot } from './audio.js';
+import { distance2d } from './rng.js';
+import { killPedestrian } from './traffic.js';
+import { damageCar } from './vehicles.js';
 
-const FIRE_COOLDOWN = 0.21;
-const GUN_DAMAGE = 62;
-let fireTimer = 0;
-let latched = false;
-let lastR = false;
-let hazardTimer = 0;
+export function createCombat(scene, audio) {
+  const flashLight = new THREE.PointLight(0xffc266, 0, 18);
+  scene.add(flashLight);
+  const tracers = [];
+  const tracerMat = new THREE.LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.9 });
+  const enemyTracerMat = new THREE.LineBasicMaterial({ color: 0xff9a7a, transparent: true, opacity: 0.8 });
 
-const rayDir = new THREE.Vector3();
-const rayOrigin = new THREE.Vector3();
-
-/** Hurt the player. Death itself is staged by main.js when health runs out. */
-export function damagePlayer(amount) {
-  const p = S.player;
-  if (p.dead || S.mode !== 'playing') return;
-  p.health -= amount;
-  p.lastDamageAt = S.time;
-  if (p.health <= 0) {
-    p.health = 0;
-    p.dead = true;
+  function spawnTracer(from, to, mat = tracerMat) {
+    const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
+    const line = new THREE.Line(geo, mat);
+    scene.add(line);
+    tracers.push({ line, life: 0.07 });
   }
-}
 
-/** Ray vs sphere: the distance along the ray to the surface, or Infinity. */
-function raySphere(origin, dir, cx, cy, cz, r) {
-  const ox = cx - origin.x;
-  const oy = cy - origin.y;
-  const oz = cz - origin.z;
-  const t = ox * dir.x + oy * dir.y + oz * dir.z;
-  if (t < 0) return Infinity;
-  const d2 = ox * ox + oy * oy + oz * oz - t * t;
-  if (d2 > r * r) return Infinity;
-  return t - Math.sqrt(r * r - d2);
-}
-
-/** Ray vs a building's footprint, slab test in plan view with a roofline cap. */
-function rayAabb(origin, dir, c) {
-  let tmin = 0;
-  let tmax = Infinity;
-  for (const [o, d, lo, hi] of [
-    [origin.x, dir.x, c.minX, c.maxX],
-    [origin.z, dir.z, c.minZ, c.maxZ],
-  ]) {
-    if (Math.abs(d) < 1e-8) {
-      if (o < lo || o > hi) return Infinity;
-    } else {
-      let t1 = (lo - o) / d;
-      let t2 = (hi - o) / d;
-      if (t1 > t2) [t1, t2] = [t2, t1];
-      tmin = Math.max(tmin, t1);
-      tmax = Math.min(tmax, t2);
-      if (tmin > tmax) return Infinity;
+  // --- small particle pools -------------------------------------------------
+  // Two fixed pools of tiny boxes give shots their physical punctuation:
+  // brass casings that eject from the pistol, arc and bounce once, and
+  // impact sparks that burst wherever a round lands. Both recycle the
+  // oldest live particle, so a long firefight never allocates.
+  function makePool(count, size, color) {
+    const geo = new THREE.BoxGeometry(size, size, size);
+    const mat = new THREE.MeshBasicMaterial({ color });
+    const items = [];
+    for (let i = 0; i < count; i++) {
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.visible = false;
+      scene.add(mesh);
+      items.push({ mesh, vel: new THREE.Vector3(), spin: 0, life: 0, maxLife: 1, bounced: false });
     }
+    return { items, cursor: 0 };
   }
-  // No building stands taller than 65 m for this test's purposes.
-  if (origin.y + dir.y * tmin > 65) return Infinity;
-  return tmin;
-}
+  const casings = makePool(26, 0.09, 0xd8a03c);
+  const sparks = makePool(40, 0.07, 0xffc266);
 
-/** Fire one shot from the camera through the crosshair. */
-function fire() {
-  const p = S.player;
-  S.camera.getWorldDirection(rayDir);
-  rayOrigin.copy(S.camera.position);
-  const muzzle = {
-    x: p.x + Math.sin(p.heading) * 0.55,
-    y: 1.32,
-    z: p.z + Math.cos(p.heading) * 0.55,
-  };
-  muzzleFlash(muzzle.x, muzzle.y, muzzle.z);
-  playGunshot();
-  S.addCrime(CRIME.shotFired);
-  panicAt(p.x, p.z, 24);
-
-  let bestT = 130;
-  let hitKind = null;
-  let hitRef = null;
-  for (const ped of S.peds) {
-    if (ped.dead) continue;
-    const t = raySphere(rayOrigin, rayDir, ped.x, 1.05, ped.z, 0.8);
-    if (t < bestT) {
-      bestT = t;
-      hitKind = 'ped';
-      hitRef = ped;
-    }
-  }
-  for (const v of S.vehicles) {
-    const t = raySphere(rayOrigin, rayDir, v.x, 0.95, v.z, v.radius + 0.7);
-    if (t < bestT) {
-      bestT = t;
-      hitKind = 'vehicle';
-      hitRef = v;
-    }
-  }
-  for (const c of S.colliders) {
-    if (c.pier) continue;
-    const t = rayAabb(rayOrigin, rayDir, c);
-    if (t < bestT) {
-      bestT = t;
-      hitKind = 'wall';
-      hitRef = null;
-    }
-  }
-  if (rayDir.y < -0.001) {
-    const tGround = -rayOrigin.y / rayDir.y;
-    if (tGround > 0 && tGround < bestT) {
-      bestT = tGround;
-      hitKind = 'ground';
-      hitRef = null;
-    }
-  }
-  const hitPoint = {
-    x: rayOrigin.x + rayDir.x * bestT,
-    y: rayOrigin.y + rayDir.y * bestT,
-    z: rayOrigin.z + rayDir.z * bestT,
-  };
-  spawnTracer(muzzle, hitPoint);
-  if (hitKind === 'ped') {
-    shootPedestrian(hitRef, GUN_DAMAGE);
-    S.addCrime(CRIME.shotHitsPerson);
-    spawnParticles(hitPoint.x, hitPoint.y, hitPoint.z, { count: 6, color: 0xa02020, speed: 2, life: 0.4, gravity: -6, up: 1.5 });
-  } else if (hitKind === 'vehicle') {
-    damageVehicle(hitRef, 14);
-    if (hitRef.type === 'cruiser') S.addCrime(CRIME.shotHitsPolice);
-    spawnSparks(hitPoint.x, hitPoint.y, hitPoint.z);
-  } else if (hitKind === 'wall' || hitKind === 'ground') {
-    spawnSparks(hitPoint.x, hitPoint.y, hitPoint.z);
-  }
-}
-
-/** Advance combat: draw state, firing, run-over hazards, health recovery. */
-export function updateCombat(dt) {
-  const p = S.player;
-  fireTimer = Math.max(0, fireTimer - dt);
-  hazardTimer = Math.max(0, hazardTimer - dt);
-
-  const rNow = Boolean(keys.KeyR);
-  if (rNow && !lastR) latched = !latched;
-  lastR = rNow;
-  p.gunDrawn = !p.inVehicle && (mouseDownRight || latched);
-  if (p.gunDrawn) {
-    // Aiming turns the man to face where the camera faces.
-    p.heading = S.cam.yaw;
-    if (takeClick() && fireTimer <= 0) {
-      fireTimer = FIRE_COOLDOWN;
-      fire();
-    }
+  function spawnParticle(pool, origin, vel, life, spin) {
+    const p = pool.items[pool.cursor];
+    pool.cursor = (pool.cursor + 1) % pool.items.length;
+    p.mesh.position.copy(origin);
+    p.mesh.visible = true;
+    p.vel.copy(vel);
+    p.life = life;
+    p.maxLife = life;
+    p.spin = spin;
+    p.bounced = false;
+    p.mesh.rotation.set(Math.random() * 3, Math.random() * 3, 0);
   }
 
-  // Being run down hurts, whoever is driving.
-  if (!p.inVehicle && hazardTimer <= 0) {
-    for (const v of S.vehicles) {
-      if (Math.abs(v.speed) > 4.5 && Math.hypot(v.x - p.x, v.z - p.z) < 2.1) {
-        damagePlayer(14 + Math.abs(v.speed) * 0.7);
-        hazardTimer = 0.9;
-        const dx = p.x - v.x;
-        const dz = p.z - v.z;
-        const d = Math.max(0.5, Math.hypot(dx, dz));
-        p.x += (dx / d) * 2.4;
-        p.z += (dz / d) * 2.4;
-        S.notify('You got run over!', 'bad');
-        break;
+  function stepPool(pool, dt, gravity, floorY) {
+    for (const p of pool.items) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) {
+        p.mesh.visible = false;
+        continue;
       }
+      p.vel.y -= gravity * dt;
+      p.mesh.position.addScaledVector(p.vel, dt);
+      if (p.mesh.position.y < floorY) {
+        p.mesh.position.y = floorY;
+        if (!p.bounced) {
+          p.bounced = true;
+          p.vel.y = Math.abs(p.vel.y) * 0.35;
+          p.vel.x *= 0.6;
+          p.vel.z *= 0.6;
+        } else {
+          p.vel.set(0, 0, 0);
+        }
+      }
+      p.mesh.rotation.x += p.spin * dt;
+      p.mesh.rotation.z += p.spin * 0.7 * dt;
     }
   }
 
-  // Slow recovery once the shooting stops.
-  if (!p.dead && p.health < PLAYER.maxHealth && S.time - p.lastDamageAt > 8) {
-    p.health = Math.min(PLAYER.maxHealth, p.health + 6 * dt);
+  // The muzzle flash itself: a small spiky octahedron at the gun that
+  // exists for two frames per shot, scaled randomly so no two flashes
+  // look stamped from the same mould.
+  const flashMesh = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.34),
+    new THREE.MeshBasicMaterial({ color: 0xffd98a, transparent: true, opacity: 0.95 })
+  );
+  flashMesh.visible = false;
+  scene.add(flashMesh);
+  let flashTimer = 0;
+
+  function burstSparks(at) {
+    for (let i = 0; i < 6; i++) {
+      const vel = new THREE.Vector3(
+        (Math.random() - 0.5) * 5,
+        Math.random() * 3.4,
+        (Math.random() - 0.5) * 5
+      );
+      spawnParticle(sparks, at, vel, 0.28 + Math.random() * 0.15, 9);
+    }
+  }
+
+  return {
+    ammo: 12,
+    magSize: 12,
+    reloadTimer: 0,
+    cooldown: 0,
+    shotsFired: 0,
+
+    update(dt) {
+      this.cooldown = Math.max(0, this.cooldown - dt);
+      if (this.reloadTimer > 0) {
+        this.reloadTimer -= dt;
+        if (this.reloadTimer <= 0) this.ammo = this.magSize;
+      }
+      flashLight.intensity = Math.max(0, flashLight.intensity - dt * 60);
+      if (flashTimer > 0) {
+        flashTimer -= dt;
+        if (flashTimer <= 0) flashMesh.visible = false;
+      }
+      stepPool(casings, dt, 7.5, 0.06);
+      stepPool(sparks, dt, 9, 0.05);
+      for (let i = tracers.length - 1; i >= 0; i--) {
+        tracers[i].life -= dt;
+        if (tracers[i].life <= 0) {
+          scene.remove(tracers[i].line);
+          tracers[i].line.geometry.dispose();
+          tracers.splice(i, 1);
+        }
+      }
+    },
+
+    // Visual-only enemy fire: a warmer tracer from the guard's gun to a
+    // point near the player, plus a small flash at their muzzle, so the
+    // player can read where shots are coming from.
+    enemyShot(from, to) {
+      const muzzle = new THREE.Vector3(from.x, 1.35, from.z);
+      const end = new THREE.Vector3(to.x + (Math.random() - 0.5) * 3, 1.1, to.z + (Math.random() - 0.5) * 3);
+      spawnTracer(muzzle, end, enemyTracerMat);
+      flashLight.position.copy(muzzle);
+      flashLight.intensity = 1.6;
+    },
+
+    reload() {
+      if (this.ammo < this.magSize && this.reloadTimer <= 0) this.reloadTimer = 0.9;
+    },
+
+    // Fire from origin toward a world target point. Targets is a list of
+    // {pos, radius, kind, ref} entries; returns the entry hit, or null.
+    fire(origin, targetPoint, targets, onCrime) {
+      if (this.cooldown > 0 || this.reloadTimer > 0) return null;
+      if (this.ammo <= 0) {
+        audio.dryFire();
+        this.reload();
+        return null;
+      }
+      this.ammo -= 1;
+      this.cooldown = 0.22;
+      this.shotsFired += 1;
+      audio.shot();
+      if (onCrime) onCrime('shot', origin);
+      flashLight.position.copy(origin).y += 1.4;
+      flashLight.intensity = 3;
+
+      const dir = new THREE.Vector3().subVectors(targetPoint, origin).normalize();
+      let bestT = 90;
+      let best = null;
+      for (const t of targets) {
+        const to = new THREE.Vector3(t.pos.x - origin.x, 1.1 - origin.y, t.pos.z - origin.z);
+        const along = to.dot(dir);
+        if (along < 0 || along > bestT) continue;
+        const closest = new THREE.Vector3().copy(dir).multiplyScalar(along).add(origin);
+        const miss = distance2d(closest.x, closest.z, t.pos.x, t.pos.z);
+        if (miss < (t.radius ?? 0.7)) {
+          bestT = along;
+          best = t;
+        }
+      }
+      const end = best
+        ? new THREE.Vector3(best.pos.x, 1.1, best.pos.z)
+        : new THREE.Vector3().copy(dir).multiplyScalar(90).add(origin);
+      end.y = Math.max(0.4, end.y);
+      const muzzle = new THREE.Vector3(origin.x, origin.y + 1.35, origin.z);
+      spawnTracer(muzzle, end);
+      // Flash mesh at the muzzle, stretched along the shot direction.
+      flashMesh.position.copy(muzzle);
+      flashMesh.scale.set(0.7 + Math.random() * 0.5, 0.7 + Math.random() * 0.5, 1.6 + Math.random());
+      flashMesh.lookAt(end);
+      flashMesh.visible = true;
+      flashTimer = 0.045;
+      // One brass casing pops out sideways and up, every shot.
+      const side = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
+      const casingVel = side.multiplyScalar(1.3 + Math.random() * 0.7);
+      casingVel.y = 2.1 + Math.random() * 0.6;
+      spawnParticle(casings, muzzle, casingVel, 0.85, 12);
+      if (best) {
+        audio.hit();
+        burstSparks(end);
+        if (best.kind === 'car') damageCar(best.ref, 14);
+        else if (best.ref) {
+          best.ref.health -= 34;
+          if (best.ref.health <= 0 && !best.ref.dead) {
+            killPedestrian(best.ref);
+            if (onCrime) onCrime(best.ref.isEnemy ? 'shot' : 'murder', best.ref.pos);
+          } else if (onCrime && !best.ref.isEnemy) {
+            onCrime('assault', best.ref.pos);
+          }
+        }
+      }
+      if (this.ammo === 0) this.reload();
+      return best;
+    },
+  };
+}
+
+// Enemy shooting: guards fire at the player when they have line-of-sight
+// range and their personal cooldown has elapsed. Accuracy is modest at
+// range so cover (the warehouse crates) genuinely helps.
+export function stepEnemyGunman(enemy, dt, player, audio, hurtPlayerFn, fx = null) {
+  if (enemy.dead) return;
+  enemy.shootTimer = (enemy.shootTimer ?? 1.5) - dt;
+  const d = distance2d(enemy.pos.x, enemy.pos.z, player.pos.x, player.pos.z);
+  // Guards advance until they are in comfortable range, and strafe a
+  // little while in it so they are not standing targets in the open.
+  if (d > 16) {
+    const h = Math.atan2(player.pos.x - enemy.pos.x, player.pos.z - enemy.pos.z);
+    enemy.pos.x += Math.sin(h) * 3.4 * dt;
+    enemy.pos.z += Math.cos(h) * 3.4 * dt;
+    enemy.heading = h;
+  } else {
+    enemy.heading = Math.atan2(player.pos.x - enemy.pos.x, player.pos.z - enemy.pos.z);
+    enemy.strafePhase = (enemy.strafePhase ?? Math.random() * 6) + dt;
+    const strafe = Math.sin(enemy.strafePhase * 0.9) * 1.1;
+    enemy.pos.x += Math.cos(enemy.heading) * strafe * dt;
+    enemy.pos.z -= Math.sin(enemy.heading) * strafe * dt;
+  }
+  enemy.mesh.position.copy(enemy.pos);
+  enemy.mesh.rotation.y = enemy.heading;
+  if (d < 42 && enemy.shootTimer <= 0) {
+    enemy.shootTimer = 1.1 + Math.random() * 0.9;
+    audio.shot();
+    if (fx) fx(enemy.pos, player.pos);
+    const hitChance = Math.max(0.12, 0.55 - d * 0.008);
+    if (Math.random() < hitChance) {
+      audio.hurt();
+      hurtPlayerFn(player.car ? 4 : 8);
+    }
   }
 }
