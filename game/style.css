@@ -1,0 +1,40 @@
+/* SOLANO HEAT — screen styling. Sun-bleached teal, coral and sand. */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0b2027; font-family: "Segoe UI", Arial, sans-serif; color: #fff7ea; }
+#app { position: relative; width: 100%; height: 100%; }
+#game-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.hidden { display: none !important; }
+
+#hud { position: absolute; inset: 0; pointer-events: none; }
+#hud-top-left { position: absolute; top: 14px; left: 14px; }
+#health-wrap { position: relative; width: 220px; height: 20px; background: rgba(0,0,0,.55); border: 2px solid #fff7ea; border-radius: 4px; overflow: hidden; }
+#health-bar { height: 100%; width: 100%; background: linear-gradient(90deg, #ff5a3c, #ffb03a); transition: width .15s; }
+#health-text { position: absolute; right: 6px; top: 0; font-size: 13px; font-weight: 700; line-height: 18px; text-shadow: 0 1px 2px #000; }
+#cash-label { margin-top: 6px; font-size: 24px; font-weight: 800; color: #7dff9a; text-shadow: 0 2px 3px #000; }
+#wanted-stars { font-size: 26px; letter-spacing: 3px; color: #ffd23c; text-shadow: 0 2px 4px #000; min-height: 30px; }
+#mission-box { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); width: 430px; max-width: 60vw; background: rgba(6,32,40,.72); border: 1px solid #2ec4b6; border-radius: 8px; padding: 8px 12px; text-align: center; }
+#mission-title { font-weight: 800; letter-spacing: 1px; color: #2ec4b6; font-size: 15px; }
+#mission-text { font-size: 14px; margin-top: 2px; }
+#mission-timer { font-size: 18px; font-weight: 800; color: #ffb03a; }
+#bust-wrap { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); width: 320px; text-align: center; font-weight: 800; color: #ff5a3c; text-shadow: 0 1px 3px #000; }
+#bust-track { height: 14px; background: rgba(0,0,0,.6); border: 2px solid #ff5a3c; border-radius: 4px; overflow: hidden; }
+#bust-bar { height: 100%; width: 0%; background: #ff5a3c; }
+#phone-box { position: absolute; right: 16px; bottom: 210px; width: 260px; background: #10222b; border: 2px solid #2ec4b6; border-radius: 14px; padding: 10px 12px; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+#phone-from { font-size: 11px; letter-spacing: 2px; color: #2ec4b6; font-weight: 700; }
+#phone-text { font-size: 14px; margin-top: 4px; line-height: 1.35; }
+#prompt-label { position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.7); padding: 7px 14px; border-radius: 20px; font-size: 15px; font-weight: 600; }
+#side-label { position: absolute; bottom: 128px; left: 50%; transform: translateX(-50%); background: rgba(6,32,40,.78); border: 1px solid #2ec4b6; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: 700; color: #aef3ec; white-space: nowrap; }
+#crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 26px; color: #fff; text-shadow: 0 0 4px #000; }
+#minimap { position: absolute; right: 14px; bottom: 14px; width: 180px; height: 180px; border: 3px solid #fff7ea; border-radius: 50%; background: #123; }
+#speed-label { position: absolute; right: 24px; bottom: 204px; font-size: 20px; font-weight: 800; text-shadow: 0 2px 3px #000; }
+#toast-box { position: absolute; bottom: 30px; left: 14px; font-size: 16px; font-weight: 700; color: #ffd23c; text-shadow: 0 2px 3px #000; }
+
+#menu-screen, #pause-screen, #end-screen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: linear-gradient(180deg, rgba(8,40,52,.82), rgba(120,40,20,.78)); text-align: center; padding: 20px; }
+#game-title { font-size: 76px; letter-spacing: 4px; font-weight: 900; color: #ffb03a; text-shadow: 0 4px 0 #ff5a3c, 0 10px 24px rgba(0,0,0,.6); }
+#game-tagline { font-size: 19px; margin: 8px 0 22px; }
+button { pointer-events: auto; cursor: pointer; margin: 5px; padding: 12px 34px; font-size: 17px; font-weight: 800; letter-spacing: 1px; color: #10222b; background: #ffb03a; border: none; border-radius: 6px; box-shadow: 0 4px 0 #c96a1e; }
+button:hover { background: #ffc35e; }
+#how-box { max-width: 560px; background: rgba(0,0,0,.45); border-radius: 8px; padding: 12px 16px; margin-top: 10px; line-height: 1.5; font-size: 14px; }
+#menu-foot { margin-top: 18px; font-size: 12px; opacity: .75; }
+#pause-screen h2, #end-screen h2 { font-size: 44px; letter-spacing: 3px; margin-bottom: 14px; }
+#end-text { font-size: 17px; margin-bottom: 16px; max-width: 480px; line-height: 1.45; }
