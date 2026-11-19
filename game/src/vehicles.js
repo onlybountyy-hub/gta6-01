@@ -1,6 +1,10 @@
-// vehicles.js — builds every car in Port Solano from primitives (sedans, hatchbacks,
-// pickups and police cruisers with light bars), owns the arcade driving model the
-// player uses, and resolves car-against-world and car-against-car collisions.
+// vehicles.js — every car in Port Solano, from mesh to motion.
+//
+// Cars are assembled from primitives (a body, a glass cabin, lights, spinning
+// wheels, and for PSPD cruisers a light bar and white doors). This module owns
+// spawning and removal, the arcade driving model the player uses, the shared
+// steering helpers the AI drivers use, per-frame integration with building
+// collision, and car-against-car resolution.
 
 import * as THREE from 'three';
 import { CAR_TYPES, DRIVING, PLACES } from './config.js';
@@ -12,16 +16,16 @@ import { playCrash } from './audio.js';
 
 export const CAR_COLORS = [0xd94f30, 0x2f6db8, 0xe8e3d8, 0x3f9e58, 0xc7a23a, 0x7456a6, 0x22262b, 0xb8bcc2, 0x7fb3c8, 0xe07ba0];
 
-const bodyGeoCache = new Map();
+const geoCache = new Map();
 function boxGeo(w, h, d) {
   const key = `${w}|${h}|${d}`;
-  if (!bodyGeoCache.has(key)) bodyGeoCache.set(key, new THREE.BoxGeometry(w, h, d));
-  return bodyGeoCache.get(key);
+  if (!geoCache.has(key)) geoCache.set(key, new THREE.BoxGeometry(w, h, d));
+  return geoCache.get(key);
 }
 const wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.28, 10);
-wheelGeo.rotateZ(Math.PI / 2); // axle along X, so the round faces point sideways
+wheelGeo.rotateZ(Math.PI / 2); // axle along X
 
-/** Build the visible mesh for one car. Wheels and light bars land in userData. */
+/** Assemble one car's visible mesh. Wheels and light-bar parts land in userData. */
 export function buildCarMesh(type, colorHex) {
   const spec = CAR_TYPES[type];
   const group = new THREE.Group();
@@ -40,7 +44,6 @@ export function buildCarMesh(type, colorHex) {
     bed.position.set(0, 0.42 + spec.height * 0.62, spec.length * 0.28);
     group.add(bed);
   }
-  // Headlights and tail lights (emissive boxes; the player's car gets a real beam).
   const headMat = new THREE.MeshBasicMaterial({ color: 0xfff2c0 });
   const tailMat = new THREE.MeshBasicMaterial({ color: 0xd42a2a });
   for (const sx of [-1, 1]) {
@@ -54,7 +57,7 @@ export function buildCarMesh(type, colorHex) {
   const wheels = [];
   const frontWheels = [];
   const wheelMat = new THREE.MeshLambertMaterial({ color: 0x141518 });
-  for (const [wx, wz, front] of [
+  for (const [wx, wz, isFront] of [
     [-spec.width / 2, spec.length * 0.32, true],
     [spec.width / 2, spec.length * 0.32, true],
     [-spec.width / 2, -spec.length * 0.32, false],
@@ -66,25 +69,22 @@ export function buildCarMesh(type, colorHex) {
     pivot.add(wheel);
     group.add(pivot);
     wheels.push(wheel);
-    if (front) frontWheels.push(pivot);
+    if (isFront) frontWheels.push(pivot);
   }
-  group.userData = { wheels, frontWheels, lightBar: null, lightRed: null, lightBlue: null };
+  group.userData = { wheels, frontWheels, lightRed: null, lightBlue: null };
   if (type === 'cruiser') {
     const barBase = new THREE.Mesh(boxGeo(1.1, 0.1, 0.4), trim);
     barBase.position.set(0, 0.42 + spec.height * 1.06, -spec.length * 0.04);
     group.add(barBase);
-    const redMat = new THREE.MeshBasicMaterial({ color: 0xff2a2a });
-    const blueMat = new THREE.MeshBasicMaterial({ color: 0x2a5cff });
-    const red = new THREE.Mesh(boxGeo(0.5, 0.16, 0.36), redMat);
+    const red = new THREE.Mesh(boxGeo(0.5, 0.16, 0.36), new THREE.MeshBasicMaterial({ color: 0xff2a2a }));
     red.position.set(-0.28, 0.42 + spec.height * 1.06 + 0.12, -spec.length * 0.04);
-    const blue = new THREE.Mesh(boxGeo(0.5, 0.16, 0.36), blueMat);
+    const blue = new THREE.Mesh(boxGeo(0.5, 0.16, 0.36), new THREE.MeshBasicMaterial({ color: 0x2a5cff }));
     blue.position.set(0.28, 0.42 + spec.height * 1.06 + 0.12, -spec.length * 0.04);
     group.add(red);
     group.add(blue);
-    group.userData.lightBar = barBase;
     group.userData.lightRed = red;
     group.userData.lightBlue = blue;
-    // White doors on the black cruiser body read as police from a distance.
+    // White doors on a black body: reads as POLICE from two blocks away.
     const doorMat = new THREE.MeshLambertMaterial({ color: 0xf0f0ea });
     for (const sx of [-1, 1]) {
       const door = new THREE.Mesh(boxGeo(0.03, spec.height * 0.4, spec.length * 0.4), doorMat);
@@ -98,7 +98,7 @@ export function buildCarMesh(type, colorHex) {
   return group;
 }
 
-/** Create a vehicle object + mesh and register it in S.vehicles. */
+/** Create a vehicle record and its mesh, and register both in S.vehicles. */
 export function spawnVehicle(type, colorHex, x, z, heading, opts = {}) {
   const spec = CAR_TYPES[type];
   const mesh = buildCarMesh(type, type === 'cruiser' ? 0x23262b : colorHex);
@@ -116,26 +116,25 @@ export function spawnVehicle(type, colorHex, x, z, heading, opts = {}) {
     steer: 0,
     health: 100,
     radius: DRIVING.radius * (spec.length / 4.4),
-    ai: opts.ai || null, // {role:'traffic'|'police', ...} or null when parked/player
+    ai: opts.ai || null, // {role: 'traffic' | 'police', ...}; null when parked or player-driven
     parked: Boolean(opts.parked),
     missionMark: false,
     smokeTimer: Math.random(),
     wheelSpin: 0,
-    honkTimer: randRange(Math.random, 4, 14),
     dead: false,
   };
   S.vehicles.push(vehicle);
   return vehicle;
 }
 
-/** Remove a vehicle from the world entirely (used when police give up far away). */
+/** Remove a vehicle from the world entirely (police.js despawning far units). */
 export function removeVehicle(vehicle) {
   const idx = S.vehicles.indexOf(vehicle);
   if (idx >= 0) S.vehicles.splice(idx, 1);
   S.scene.remove(vehicle.mesh);
 }
 
-/** Park a scatter of locked civilian cars in the lot spots world.js marked out. */
+/** Scatter locked civilian cars through the lot bays world.js marked out. */
 export function spawnParkedCars() {
   const rng = makeRng(S.seed + 77);
   const spots = S.parkingSpots.filter((s) => !s.park);
@@ -143,19 +142,19 @@ export function spawnParkedCars() {
   for (let i = 0; i < count; i += 1) {
     const spot = spots[Math.floor(rng() * spots.length)];
     if (S.vehicles.some((v) => Math.abs(v.x - spot.x) < 3 && Math.abs(v.z - spot.z) < 3)) continue;
-    const type = pick(rng, ['sedan', 'sedan', 'hatch', 'truck']);
-    spawnVehicle(type, pick(rng, CAR_COLORS), spot.x, spot.z, spot.heading || 0, { parked: true });
+    spawnVehicle(pick(rng, ['sedan', 'sedan', 'hatch', 'truck']), pick(rng, CAR_COLORS), spot.x, spot.z, spot.heading || 0, { parked: true });
   }
 }
 
-/** Forward vector for a heading angle. */
+/** The forward vector of a heading angle. */
 export function forwardOf(heading) {
   return { x: Math.sin(heading), z: Math.cos(heading) };
 }
 
 /**
- * Move one vehicle for a frame: apply its speed along its heading, resolve building
- * and world-edge collisions, and sync the mesh (including wheel spin and steering).
+ * Move one vehicle for one frame: advance along its heading, resolve building
+ * and world-edge collisions (a hard hit costs health), sync the mesh including
+ * wheel spin and front-wheel steer, and puff smoke when the engine is hurt.
  */
 export function integrateVehicle(v, dt) {
   const fwd = forwardOf(v.heading);
@@ -164,7 +163,7 @@ export function integrateVehicle(v, dt) {
   const hit = collideCircle(v.x, v.z, v.radius);
   if (hit.x !== v.x || hit.z !== v.z) {
     if (Math.abs(v.speed) > 7) {
-      damageVehicle(v, Math.abs(v.speed) * 0.55, true);
+      damageVehicle(v, Math.abs(v.speed) * 0.55);
       if (S.player.inVehicle === v) S.notify('Crash!');
     }
     v.x = hit.x;
@@ -180,19 +179,17 @@ export function integrateVehicle(v, dt) {
   v.wheelSpin += (v.speed * dt) / 0.36;
   for (const wheel of v.mesh.userData.wheels) wheel.rotation.x = v.wheelSpin;
   for (const pivot of v.mesh.userData.frontWheels) pivot.rotation.y = v.steer * 0.45;
-  // Damage smoke.
   if (v.health < 55 && !v.dead) {
     v.smokeTimer -= dt;
     if (v.smokeTimer <= 0) {
       v.smokeTimer = v.health < 25 ? 0.08 : 0.22;
-      const nose = forwardOf(v.heading);
-      spawnSmoke(v.x + nose.x * v.spec.length * 0.4, 1.1, v.z + nose.z * v.spec.length * 0.4, v.health < 25);
+      spawnSmoke(v.x + fwd.x * v.spec.length * 0.4, 1.1, v.z + fwd.z * v.spec.length * 0.4, v.health < 25);
     }
   }
 }
 
-/** Car-against-car: push overlapping cars apart and trade a little speed. */
-export function collideVehicles(dt) {
+/** Car against car: separate overlaps, trade momentum, bill both for the damage. */
+export function collideVehicles() {
   const list = S.vehicles;
   for (let i = 0; i < list.length; i += 1) {
     for (let j = i + 1; j < list.length; j += 1) {
@@ -213,22 +210,22 @@ export function collideVehicles(dt) {
       b.z += nz * overlap;
       const relSpeed = Math.abs(a.speed - b.speed);
       if (relSpeed > 5) {
-        damageVehicle(a, relSpeed * 0.5, false);
-        damageVehicle(b, relSpeed * 0.5, false);
+        damageVehicle(a, relSpeed * 0.5);
+        damageVehicle(b, relSpeed * 0.5);
         if (S.player.inVehicle === a || S.player.inVehicle === b) {
           playCrash(Math.min(1, relSpeed / 22));
           if (b.ai && b.ai.role === 'traffic') S.addCrime(8);
         }
       }
-      const swap = (a.speed + b.speed) / 2;
-      a.speed = swap * 0.8;
-      b.speed = swap * 0.8;
+      const swap = ((a.speed + b.speed) / 2) * 0.8;
+      a.speed = swap;
+      b.speed = swap;
     }
   }
 }
 
-/** Apply damage; a vehicle at zero health is a smoking wreck that will not move. */
-export function damageVehicle(v, amount, byPlayerCrash) {
+/** Apply damage; at zero health a car is a wreck that will never move again. */
+export function damageVehicle(v, amount) {
   if (v.dead) return;
   v.health -= amount;
   if (v.health <= 0) {
@@ -239,21 +236,21 @@ export function damageVehicle(v, amount, byPlayerCrash) {
 }
 
 /**
- * The player's driving model: throttle/brake/reverse, speed-sensitive steering and a
- * handbrake that trades grip for turn rate. Reads input via the passed key state.
+ * The player's driving model: throttle, brake-that-becomes-reverse, drag,
+ * speed-sensitive steering, and a handbrake that trades grip for turn rate.
  */
 export function drivePlayerVehicle(v, dt, input) {
-  const spec = v.spec;
-  const topSpeed = v.dead ? 0 : spec.topSpeed;
+  const topSpeed = v.dead ? 0 : v.spec.topSpeed;
   if (input.throttle) {
-    v.speed += spec.accel * dt * (v.speed < 0 ? 2.2 : 1);
+    v.speed += v.spec.accel * dt * (v.speed < 0 ? 2.2 : 1);
   } else if (input.brake) {
     if (v.speed > 0.6) v.speed -= DRIVING.brake * dt;
-    else v.speed = Math.max(-DRIVING.reverseMax, v.speed - spec.accel * 0.7 * dt);
+    else v.speed = Math.max(-DRIVING.reverseMax, v.speed - v.spec.accel * 0.7 * dt);
   }
-  // Drag and rolling resistance.
   v.speed -= v.speed * DRIVING.drag * dt;
-  if (!input.throttle && !input.brake) v.speed -= Math.sign(v.speed) * Math.min(Math.abs(v.speed), 2.2 * dt);
+  if (!input.throttle && !input.brake) {
+    v.speed -= Math.sign(v.speed) * Math.min(Math.abs(v.speed), 2.2 * dt);
+  }
   v.speed = Math.max(-DRIVING.reverseMax, Math.min(topSpeed, v.speed));
   const steerTarget = (input.steerLeft ? 1 : 0) - (input.steerRight ? 1 : 0);
   v.steer += (steerTarget - v.steer) * Math.min(1, dt * 7);
@@ -265,22 +262,20 @@ export function drivePlayerVehicle(v, dt, input) {
   if (input.handbrake) v.speed -= v.speed * 1.4 * dt;
 }
 
-/** Steer an AI vehicle toward a point; returns the distance left to it. */
+/** Steer an AI vehicle toward a point at a capped turn rate; returns distance left. */
 export function steerToward(v, tx, tz, dt, turnRate = 1.9) {
   const dx = tx - v.x;
   const dz = tz - v.z;
   const dist = Math.hypot(dx, dz);
-  const targetHeading = Math.atan2(dx, dz);
-  let diff = targetHeading - v.heading;
+  let diff = Math.atan2(dx, dz) - v.heading;
   while (diff > Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
-  const turn = Math.max(-turnRate * dt, Math.min(turnRate * dt, diff));
-  v.heading += turn;
+  v.heading += Math.max(-turnRate * dt, Math.min(turnRate * dt, diff));
   v.steer = Math.max(-1, Math.min(1, diff * 1.6));
   return dist;
 }
 
-/** Ease an AI vehicle's speed toward a target with its own acceleration limits. */
+/** Ease an AI vehicle's speed toward a target using its own accel/brake limits. */
 export function approachSpeed(v, target, dt) {
   const accel = target > v.speed ? v.spec.accel : DRIVING.brake;
   if (v.speed < target) v.speed = Math.min(target, v.speed + accel * dt);

@@ -1,21 +1,25 @@
-// audio.js — all of Solano Heat's sound is synthesised with WebAudio: a sawtooth
-// engine whose pitch follows speed, a two-tone siren, horns, gunshots, punches,
-// pickups and a slow synthwave pad loop. There are no audio files. The context is
-// created lazily on the first user gesture, as browsers require.
+// audio.js — the whole soundtrack is synthesised; there are no audio files.
+//
+// A WebAudio engine voice (two detuned oscillators through a lowpass, pitch and
+// growl following speed), an LFO-swept siren, and a kit of one-shot voices —
+// gunshot, punch, horn, crash, pickup, success and fail stings — built from
+// noise bursts and shaped tones. A slow synthwave pad loops underneath. The
+// context is created lazily on the first user gesture, as browsers require.
 
 let ctx = null;
 let master = null;
 let muted = false;
 
 let engineOsc = null;
+let engineSub = null;
 let engineGain = null;
 let engineFilter = null;
 let sirenOsc = null;
 let sirenGain = null;
-let sirenLfo = null;
 let ambientTimer = null;
+let sharedNoise = null;
 
-/** Create the context and the persistent engine/siren voices. Safe to call twice. */
+/** Create the context and the two persistent voices. Safe to call repeatedly. */
 export function initAudio() {
   if (ctx) {
     if (ctx.state === 'suspended') ctx.resume();
@@ -28,11 +32,13 @@ export function initAudio() {
   master.gain.value = muted ? 0 : 0.55;
   master.connect(ctx.destination);
 
-  // Engine: two detuned saws through a lowpass, pitch and growl follow speed.
+  // Engine: saw + square sub through a lowpass. Idle is a murmur; speed opens it.
   engineOsc = ctx.createOscillator();
   engineOsc.type = 'sawtooth';
-  const engineSub = ctx.createOscillator();
+  engineOsc.frequency.value = 55;
+  engineSub = ctx.createOscillator();
   engineSub.type = 'square';
+  engineSub.frequency.value = 28;
   engineFilter = ctx.createBiquadFilter();
   engineFilter.type = 'lowpass';
   engineFilter.frequency.value = 300;
@@ -42,58 +48,53 @@ export function initAudio() {
   engineSub.connect(engineFilter);
   engineFilter.connect(engineGain);
   engineGain.connect(master);
-  engineOsc.frequency.value = 55;
-  engineSub.frequency.value = 28;
   engineOsc.start();
   engineSub.start();
-  engineOsc._sub = engineSub;
 
-  // Siren: a triangle wave whose frequency an LFO sweeps between two tones.
+  // Siren: a triangle whose frequency an LFO sweeps between the two tones.
   sirenOsc = ctx.createOscillator();
   sirenOsc.type = 'triangle';
   sirenOsc.frequency.value = 800;
-  sirenLfo = ctx.createOscillator();
-  sirenLfo.type = 'square';
-  sirenLfo.frequency.value = 0.7;
+  const lfo = ctx.createOscillator();
+  lfo.type = 'square';
+  lfo.frequency.value = 0.7;
   const lfoGain = ctx.createGain();
   lfoGain.gain.value = 180;
-  sirenLfo.connect(lfoGain);
+  lfo.connect(lfoGain);
   lfoGain.connect(sirenOsc.frequency);
   sirenGain = ctx.createGain();
   sirenGain.gain.value = 0;
   sirenOsc.connect(sirenGain);
   sirenGain.connect(master);
   sirenOsc.start();
-  sirenLfo.start();
+  lfo.start();
 }
 
-/** Per-frame: engine loudness/pitch from the driven car (or 0 when on foot). */
+/** Per-frame engine voice: loudness and pitch from the driven car (0 on foot). */
 export function updateEngine(speedNorm, driving) {
   if (!ctx || !engineGain) return;
   const t = ctx.currentTime;
-  const target = driving ? 0.05 + speedNorm * 0.075 : 0;
-  engineGain.gain.setTargetAtTime(target, t, 0.08);
+  engineGain.gain.setTargetAtTime(driving ? 0.05 + speedNorm * 0.075 : 0, t, 0.08);
   const freq = 52 + speedNorm * 165;
   engineOsc.frequency.setTargetAtTime(freq, t, 0.05);
-  if (engineOsc._sub) engineOsc._sub.frequency.setTargetAtTime(freq * 0.5, t, 0.05);
+  engineSub.frequency.setTargetAtTime(freq * 0.5, t, 0.05);
   engineFilter.frequency.setTargetAtTime(240 + speedNorm * 900, t, 0.08);
 }
 
-/** Per-frame: siren volume from the nearest police cruiser (0 = silent). */
+/** Per-frame siren voice: volume follows the nearest cruiser (0 = silent). */
 export function updateSiren(level) {
   if (!ctx || !sirenGain) return;
   sirenGain.gain.setTargetAtTime(Math.min(0.11, level), ctx.currentTime, 0.12);
 }
 
 function noiseBuffer() {
-  const len = ctx.sampleRate * 0.5;
-  const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+  const buffer = ctx.createBuffer(1, ctx.sampleRate * 0.5, ctx.sampleRate);
   const data = buffer.getChannelData(0);
-  for (let i = 0; i < len; i += 1) data[i] = Math.random() * 2 - 1;
+  for (let i = 0; i < data.length; i += 1) data[i] = Math.random() * 2 - 1;
   return buffer;
 }
-let sharedNoise = null;
 
+/** A filtered noise burst with an exponential decay — the thump of every impact. */
 function burst({ duration = 0.15, filterFreq = 1200, type = 'lowpass', gain = 0.3, sweepTo = null }) {
   if (!ctx) return;
   if (!sharedNoise) sharedNoise = noiseBuffer();
@@ -113,6 +114,7 @@ function burst({ duration = 0.15, filterFreq = 1200, type = 'lowpass', gain = 0.
   src.stop(ctx.currentTime + duration + 0.02);
 }
 
+/** One shaped oscillator note: fast attack, exponential decay, optional glide. */
 function tone({ freq = 440, end = null, duration = 0.2, type = 'sine', gain = 0.2, delay = 0 }) {
   if (!ctx) return;
   const t0 = ctx.currentTime + delay;
@@ -131,38 +133,38 @@ function tone({ freq = 440, end = null, duration = 0.2, type = 'sine', gain = 0.
 }
 
 export function playGunshot() {
-  burst({ duration: 0.16, filterFreq: 3200, type: 'lowpass', gain: 0.5, sweepTo: 300 });
+  burst({ duration: 0.16, filterFreq: 3200, gain: 0.5, sweepTo: 300 });
   tone({ freq: 160, end: 55, duration: 0.1, type: 'square', gain: 0.16 });
 }
 export function playPunch() {
   burst({ duration: 0.09, filterFreq: 500, gain: 0.35 });
-  tone({ freq: 110, end: 60, duration: 0.09, type: 'sine', gain: 0.3 });
+  tone({ freq: 110, end: 60, duration: 0.09, gain: 0.3 });
 }
 export function playHorn(long = false) {
-  tone({ freq: 370, duration: long ? 0.5 : 0.22, type: 'square', gain: 0.07 });
-  tone({ freq: 466, duration: long ? 0.5 : 0.22, type: 'square', gain: 0.06 });
+  const duration = long ? 0.5 : 0.22;
+  tone({ freq: 370, duration, type: 'square', gain: 0.07 });
+  tone({ freq: 466, duration, type: 'square', gain: 0.06 });
 }
 export function playCrash(strength = 1) {
   burst({ duration: 0.28, filterFreq: 900, gain: 0.3 * strength, sweepTo: 120 });
-  tone({ freq: 90, end: 40, duration: 0.22, type: 'sine', gain: 0.25 * strength });
+  tone({ freq: 90, end: 40, duration: 0.22, gain: 0.25 * strength });
 }
 export function playPickup() {
-  tone({ freq: 660, duration: 0.12, type: 'sine', gain: 0.22 });
-  tone({ freq: 990, duration: 0.2, type: 'sine', gain: 0.22, delay: 0.09 });
+  tone({ freq: 660, duration: 0.12, gain: 0.22 });
+  tone({ freq: 990, duration: 0.2, gain: 0.22, delay: 0.09 });
 }
 export function playSuccessSting() {
-  const notes = [523, 659, 784, 1047];
-  notes.forEach((freq, i) => tone({ freq, duration: 0.34, type: 'triangle', gain: 0.2, delay: i * 0.1 }));
+  [523, 659, 784, 1047].forEach((freq, i) => tone({ freq, duration: 0.34, type: 'triangle', gain: 0.2, delay: i * 0.1 }));
 }
 export function playFailSting() {
   tone({ freq: 330, end: 220, duration: 0.4, type: 'triangle', gain: 0.2 });
   tone({ freq: 220, end: 147, duration: 0.55, type: 'triangle', gain: 0.2, delay: 0.16 });
 }
 export function playClick() {
-  tone({ freq: 840, duration: 0.05, type: 'sine', gain: 0.12 });
+  tone({ freq: 840, duration: 0.05, gain: 0.12 });
 }
 
-/** Start the ambient synthwave pad: a slow Am–F–C–G wash, scheduled bar by bar. */
+/** The ambient pad: a slow Am–F–C–G wash, one bar scheduled at a time. */
 export function startAmbient() {
   if (!ctx || ambientTimer) return;
   const chords = [
@@ -195,7 +197,7 @@ export function startAmbient() {
   ambientTimer = setInterval(playBar, 5800);
 }
 
-/** Toggle mute (M key). Returns the new muted state. */
+/** Toggle mute (the M key). Returns the new muted state. */
 export function toggleMute() {
   muted = !muted;
   if (master && ctx) master.gain.setTargetAtTime(muted ? 0 : 0.55, ctx.currentTime, 0.03);

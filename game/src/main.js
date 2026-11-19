@@ -1,8 +1,11 @@
-// main.js — Solano Heat's entry point: builds the renderer and the city, wires the
-// start and pause menus, and runs the frame loop that advances every system in
-// order (input → player → traffic → police → combat → missions → physics → HUD).
-// It also stages the two scripted interruptions, BUSTED and WASTED, and the
-// ?scene= screenshot mode.
+// main.js — Solano Heat's entry point and frame loop.
+//
+// Boot builds the renderer and the city, wires the start and pause menus, and
+// starts the loop that advances every system in order: input, player, traffic,
+// police, combat, missions, physics, world life, HUD. The two scripted
+// interruptions — BUSTED (the meter filled) and WASTED (health ran out) — are
+// staged here, as is the ?scene= screenshot mode. A small handle is published
+// on window.SolanoHeat so automated checks can drive the game headlessly.
 
 import * as THREE from 'three';
 import { PLACES } from './config.js';
@@ -16,7 +19,7 @@ import { initTraffic, updateTraffic } from './traffic.js';
 import { initPedestrians, updatePedestrians } from './pedestrians.js';
 import { updatePolice, clearWanted, bustDropPoint } from './police.js';
 import { updateCombat } from './combat.js';
-import { initMissions, updateMissions, updateDialogue, failMission } from './missions.js';
+import { initMissions, updateMissions, updateDialogue, failMission, startMission } from './missions.js';
 import { initHud, updateHud, setHudVisible } from './hud.js';
 import { initAudio, startAmbient, updateEngine, toggleMute } from './audio.js';
 import { loadSave, applySave, saveGame, clearSave, hasSave } from './save.js';
@@ -74,9 +77,8 @@ function toMenu() {
   document.getElementById('btnContinue').style.display = hasSave() ? 'block' : 'none';
 }
 
-function togglePause(force) {
-  if (S.mode === 'playing' || force === true) {
-    if (S.mode !== 'playing') return;
+function togglePause() {
+  if (S.mode === 'playing') {
     S.mode = 'paused';
     pauseEl.style.display = 'flex';
     unlockPointer();
@@ -87,7 +89,7 @@ function togglePause(force) {
   }
 }
 
-/** The BUSTED sequence: fine, a trip to the station, a clean record. */
+/** BUSTED: a fine, a lift to the station, a clean record, a blown job. */
 function handleBusted() {
   S.busted = false;
   failMission('the police got you');
@@ -106,7 +108,7 @@ function handleBusted() {
   saveGame();
 }
 
-/** The WASTED sequence: hospital, a bill, and a clean record. */
+/** WASTED: a hospital bill, a clean record, a blown job. */
 function handleWasted() {
   failMission('you woke up in hospital');
   const fee = Math.min(S.cash, 200);
@@ -124,13 +126,13 @@ function handleWasted() {
   saveGame();
 }
 
-/** Advance every vehicle physically (AI decisions have already set their speeds). */
+/** Physics step: integrate every vehicle, then resolve car-against-car. */
 function integrateAll(dt) {
   for (const v of S.vehicles) integrateVehicle(v, dt);
-  collideVehicles(dt);
+  collideVehicles();
 }
 
-/** One frame of the living city, shared by the menu backdrop and scene mode. */
+/** One frame of the living city without the player systems (menus, overlays). */
 function simulateCity(dt, withPolice) {
   updateTraffic(dt);
   updatePedestrians(dt);
@@ -145,7 +147,6 @@ function frame() {
   const dt = Math.min(0.05, clock.getDelta());
   S.time += dt;
 
-  // M mute and Esc/P pause work in most modes.
   const muteNow = Boolean(keys.KeyM);
   if (muteNow && !lastMuteKey) S.notify(toggleMute() ? 'Sound off' : 'Sound on');
   lastMuteKey = muteNow;
@@ -215,11 +216,8 @@ function frame() {
       simulateCity(dt, false);
       break;
     }
-    case 'paused': {
-      break;
-    }
     default:
-      break;
+      break; // 'paused': the world holds its breath
   }
   S.renderer.render(S.scene, S.camera);
 }
@@ -269,6 +267,9 @@ function boot() {
   document.addEventListener('pointerlockchange', () => {
     if (!document.pointerLockElement && S.mode === 'playing') togglePause();
   });
+
+  // A handle for automated verification: state plus the verbs a test needs.
+  window.SolanoHeat = { S, startGame, placePlayer, startMission };
 
   const params = new URLSearchParams(window.location.search);
   const scene = params.get('scene') || params.get('shot');

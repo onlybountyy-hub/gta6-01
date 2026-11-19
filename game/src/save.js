@@ -1,6 +1,7 @@
-// save.js — persistence in localStorage: cash, story progress and where Marco was
-// standing. Saving happens on mission completion and on demand from the pause menu;
-// loading happens from the start screen's Continue button.
+// save.js — persistence in localStorage: cash, story progress, and where
+// Marco was standing. Saving happens on mission completion and on demand from
+// the pause menu; the start screen's Continue button is what loads it back.
+// Every access is wrapped: in private mode the game simply runs unsaved.
 
 import { SAVE_KEY, PLACES } from './config.js';
 import { S } from './state.js';
@@ -20,7 +21,7 @@ export function saveGame() {
       }),
     );
   } catch {
-    // Private mode or a full store: the game simply runs unsaved.
+    // A full or blocked store is not an error worth surfacing mid-game.
   }
 }
 
@@ -30,14 +31,13 @@ export function loadSave() {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (typeof data.cash !== 'number') return null;
-    return data;
+    return typeof data.cash === 'number' ? data : null;
   } catch {
     return null;
   }
 }
 
-/** Apply a save object to the live state. Returns the spawn point to use. */
+/** Apply a save object to live state. Returns the position to spawn at. */
 export function applySave(data) {
   S.cash = data.cash;
   S.storyComplete = Boolean(data.storyComplete);
@@ -46,7 +46,7 @@ export function applySave(data) {
   return { x: PLACES.spawn.x, z: PLACES.spawn.z };
 }
 
-/** True when a Continue button should be offered. */
+/** True when the start screen should offer a Continue button. */
 export function hasSave() {
   return loadSave() !== null;
 }

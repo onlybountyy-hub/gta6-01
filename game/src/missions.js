@@ -1,8 +1,11 @@
-// missions.js — Lola Marchetti's five-job story chain, the dialogue system, the
-// objective beacon and the stage engine that runs each job: go somewhere, take a
-// car, lose the police, beat the clock, run cargo hot, and finally escape to the
-// boat. Between jobs the café marker offers the next one; after the finale the
-// chain loops for replays.
+// missions.js — Lola Marchetti's five-job story chain.
+//
+// A package run, a stolen sedan, a timed checkpoint sprint, hot cargo under a
+// three-star sky, and a final escape to the boat: each job is a list of stages
+// (go somewhere, take a car, lose the police, beat the clock) run by the small
+// stage engine below. Dialogue frames every job, a gold beacon marks the
+// current objective, and between jobs the café marker offers the next one.
+// After the finale the chain loops, so Lola always has work.
 
 import * as THREE from 'three';
 import { PLACES } from './config.js';
@@ -19,10 +22,11 @@ let packageProp = null;
 let cargoProp = null;
 let promptCooldown = 0;
 
+// Story progress and the live mission record live on S, beside everything else.
 S.progress = { nextMission: 0 };
 S.mission = { active: false, index: -1, stage: -1, stages: [], data: {} };
 S.dialogue = null; // {lines: [{who, text}], index, timer, onDone}
-S.prompt = ''; // "Press E …" line hud.js shows near the bottom
+S.prompt = ''; // the "Press E …" line hud.js paints near the bottom
 S.banner = null; // {title, sub, until}
 
 /** Show a dialogue sequence; gameplay input pauses until it finishes. */
@@ -31,7 +35,7 @@ export function showDialogue(lines, onDone = null) {
   S.mode = 'dialogue';
 }
 
-/** Advance dialogue: E or a click of time moves to the next line. */
+/** Advance dialogue: E steps it, and it auto-advances so scenes never stall. */
 export function updateDialogue(dt) {
   const d = S.dialogue;
   if (!d) return;
@@ -51,6 +55,7 @@ function banner(title, sub) {
   S.banner = { title, sub, until: S.time + 3.6 };
 }
 
+/** A stage that completes when the player (or their car) reaches a point. */
 function gotoStage(x, z, text, radius = 8) {
   return {
     kind: 'goto',
@@ -209,17 +214,14 @@ const MISSIONS = [
   },
 ];
 
-/** Create the beacon and props. Called once at boot. */
+/** Create the objective beacon and the two pickup props. Called once at boot. */
 export function initMissions() {
-  const beaconMat = new THREE.MeshBasicMaterial({
-    color: 0xffc94d,
-    transparent: true,
-    opacity: 0.3,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-  beacon = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.4, 90, 20, 1, true), beaconMat);
+  beacon = new THREE.Mesh(
+    new THREE.CylinderGeometry(2.4, 2.4, 90, 20, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: 0xffc94d, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    }),
+  );
   beacon.visible = false;
   S.scene.add(beacon);
   beaconRing = new THREE.Mesh(
@@ -246,7 +248,7 @@ export function initMissions() {
   S.scene.add(cargoProp);
 }
 
-/** Begin mission `index` with its intro dialogue. */
+/** Begin mission `index`: intro dialogue first, then the stages arm. */
 export function startMission(index) {
   const def = MISSIONS[index];
   S.mission.index = index;
@@ -271,7 +273,7 @@ function applyStage() {
     S.objective = { x: pt.x, z: pt.z, label: 'Checkpoint' };
     S.objectiveText = `${stage.text} — checkpoint 1/${stage.points.length}`;
   } else {
-    S.objective = { x: stage.x, z: stage.z, label: m.stages.length ? MISSIONS[m.index].title : '' };
+    S.objective = { x: stage.x, z: stage.z, label: MISSIONS[m.index].title };
     S.objectiveText = stage.text;
   }
   if (stage.onStart) stage.onStart();
@@ -295,7 +297,7 @@ function completeMission() {
   showDialogue(def.outro, null);
 }
 
-/** Called when the player is busted or wasted mid-job: the job is blown. */
+/** Busted or wasted mid-job: the job is blown, but Lola keeps it open. */
 export function failMission(reason) {
   if (!S.mission.active) return;
   S.mission.active = false;
@@ -308,16 +310,25 @@ export function failMission(reason) {
   S.notify(`Mission failed — ${reason}. Lola still has the job open.`, 'bad');
 }
 
-/** Per-frame mission logic: giver prompt, stage checks, race clock, beacon pose. */
+function finishStage() {
+  const m = S.mission;
+  m.stage += 1;
+  if (m.stage >= m.stages.length) completeMission();
+  else applyStage();
+}
+
+/** Per-frame mission logic: the café offer, stage checks, the race clock, the beacon. */
 export function updateMissions(dt) {
   promptCooldown = Math.max(0, promptCooldown - dt);
   const m = S.mission;
   const p = S.playerPos();
 
   if (!m.active && !S.dialogue) {
-    // The café marker offers the next job.
+    // Between jobs, the café marker offers the next one.
     S.objective = { x: PLACES.cafe.x, z: PLACES.cafe.z, label: 'Lola — next job' };
-    S.objectiveText = S.storyComplete ? 'Free roam — talk to Lola for another run' : `Talk to Lola: ${MISSIONS[S.progress.nextMission].title}`;
+    S.objectiveText = S.storyComplete
+      ? 'Free roam — talk to Lola for another run'
+      : `Talk to Lola: ${MISSIONS[S.progress.nextMission].title}`;
     const near = Math.hypot(p.x - PLACES.cafe.x, p.z - PLACES.cafe.z) < 6.5 && !S.player.inVehicle;
     S.prompt = near ? 'Press E — Talk to Lola' : '';
     if (near && keys.KeyE && promptCooldown <= 0) {
@@ -360,7 +371,7 @@ export function updateMissions(dt) {
     }
   }
 
-  // Beacon follows the objective.
+  // The beacon stands over the objective, its ring breathing.
   const show = Boolean(S.objective) && S.mode !== 'menu';
   beacon.visible = show;
   beaconRing.visible = show;
@@ -375,14 +386,7 @@ export function updateMissions(dt) {
   if (cargoProp.visible) cargoProp.rotation.y += dt * 0.9;
 }
 
-function finishStage() {
-  const m = S.mission;
-  m.stage += 1;
-  if (m.stage >= m.stages.length) completeMission();
-  else applyStage();
-}
-
-/** Mission metadata for menus and the HUD. */
+/** Mission metadata for menus and tests. */
 export function missionCount() {
   return MISSIONS.length;
 }

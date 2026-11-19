@@ -1,145 +1,143 @@
-// effects.js — transient visual effects: a pooled particle system for sparks, smoke
-// and splashes, a pooled tracer for gunfire, and a shared muzzle-flash light. Pools
-// are fixed-size so effects never allocate during the frame loop.
+// effects.js — short-lived visual noise: sparks, smoke, blood-free impact puffs,
+// bullet tracers and the muzzle flash. Everything is pooled at a fixed size, so
+// a firefight never allocates inside the frame loop: particles live in one big
+// Points cloud whose buffers are rewritten in place, tracers in a ring of ten
+// stretched boxes, and the flash is a single shared light plus sprite.
 
 import * as THREE from 'three';
 import { S } from './state.js';
 import { makeGlowTexture } from './textures.js';
 
 const MAX_PARTICLES = 900;
-let points = null;
+
+let cloud = null;
 let positions = null;
 let colors = null;
-let particles = [];
+const pool = [];
 let flashLight = null;
 let flashSprite = null;
-let flashTimer = 0;
-const tracers = [];
+let flashLeft = 0;
+const tracerPool = [];
 
-/** Build the particle pool and flash objects. Called once by main.js. */
+/** Allocate the particle cloud, the flash and the tracer ring. Boot-time only. */
 export function initEffects() {
   positions = new Float32Array(MAX_PARTICLES * 3);
   colors = new Float32Array(MAX_PARTICLES * 3);
   for (let i = 0; i < MAX_PARTICLES; i += 1) {
-    particles.push({ alive: false, x: 0, y: -50, z: 0, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 1, gravity: 0, drag: 1 });
-    positions[i * 3 + 1] = -50;
+    pool.push({ alive: false, x: 0, y: -50, z: 0, vx: 0, vy: 0, vz: 0, life: 0, gravity: 0 });
+    positions[i * 3 + 1] = -50; // parked far under the city until spawned
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  const mat = new THREE.PointsMaterial({
-    size: 0.55,
-    vertexColors: true,
-    transparent: true,
-    opacity: 0.9,
-    depthWrite: false,
-    map: makeGlowTexture(),
-    blending: THREE.AdditiveBlending,
-  });
-  points = new THREE.Points(geo, mat);
-  points.frustumCulled = false;
-  S.scene.add(points);
+  cloud = new THREE.Points(
+    geo,
+    new THREE.PointsMaterial({
+      size: 0.55,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      map: makeGlowTexture(),
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  cloud.frustumCulled = false;
+  S.scene.add(cloud);
 
   flashLight = new THREE.PointLight(0xffc37e, 0, 26, 1.6);
   S.scene.add(flashLight);
-  const spriteMat = new THREE.SpriteMaterial({
-    map: makeGlowTexture(),
-    color: 0xffd9a0,
-    transparent: true,
-    opacity: 0,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-  });
-  flashSprite = new THREE.Sprite(spriteMat);
+  flashSprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: makeGlowTexture(),
+      color: 0xffd9a0,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
   flashSprite.scale.set(1.6, 1.6, 1);
   S.scene.add(flashSprite);
 
-  const tracerMat = new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0 });
   for (let i = 0; i < 10; i += 1) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 1), tracerMat.clone());
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.03, 0.03, 1),
+      new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0 }),
+    );
     mesh.visible = false;
     S.scene.add(mesh);
-    tracers.push({ mesh, life: 0 });
+    tracerPool.push({ mesh, life: 0 });
   }
 }
 
-const _color = new THREE.Color();
+const scratchColor = new THREE.Color();
 
-/** Spawn `count` particles at a point with a colour, spread and behaviour profile. */
-export function spawnParticles(x, y, z, { count = 10, color = 0xffcc66, speed = 5, life = 0.5, gravity = -4, up = 2, size = null } = {}) {
-  _color.set(color);
+/** Wake `count` pooled particles at a point with a shared look and behaviour. */
+export function spawnParticles(x, y, z, { count = 10, color = 0xffcc66, speed = 5, life = 0.5, gravity = -4, up = 2 } = {}) {
+  scratchColor.set(color);
   let spawned = 0;
   for (let i = 0; i < MAX_PARTICLES && spawned < count; i += 1) {
-    const p = particles[i];
+    const p = pool[i];
     if (p.alive) continue;
     p.alive = true;
     p.x = x;
     p.y = y;
     p.z = z;
-    const a = Math.random() * Math.PI * 2;
+    const angle = Math.random() * Math.PI * 2;
     const r = Math.random() * speed;
-    p.vx = Math.cos(a) * r;
-    p.vz = Math.sin(a) * r;
+    p.vx = Math.cos(angle) * r;
+    p.vz = Math.sin(angle) * r;
     p.vy = Math.random() * up;
     p.life = life * (0.5 + Math.random() * 0.7);
-    p.maxLife = p.life;
     p.gravity = gravity;
-    colors[i * 3] = _color.r;
-    colors[i * 3 + 1] = _color.g;
-    colors[i * 3 + 2] = _color.b;
+    colors[i * 3] = scratchColor.r;
+    colors[i * 3 + 1] = scratchColor.g;
+    colors[i * 3 + 2] = scratchColor.b;
     spawned += 1;
   }
-  if (size !== null && points) points.material.size = size;
 }
 
-/** Sparks where a bullet lands. */
+/** Bright sparks where a bullet strikes something solid. */
 export function spawnSparks(x, y, z) {
   spawnParticles(x, y, z, { count: 9, color: 0xffd76a, speed: 4.5, life: 0.35, gravity: -9, up: 3 });
 }
 
-/** Dark smoke puff, used for damaged engines. */
+/** A dark puff from a wounded engine; bigger and faster when the car is dying. */
 export function spawnSmoke(x, y, z, big = false) {
-  spawnParticles(x, y, z, {
-    count: big ? 3 : 1,
-    color: 0x2c2c30,
-    speed: 0.7,
-    life: 1.4,
-    gravity: 1.6,
-    up: 2.6,
-  });
+  spawnParticles(x, y, z, { count: big ? 3 : 1, color: 0x2c2c30, speed: 0.7, life: 1.4, gravity: 1.6, up: 2.6 });
 }
 
-/** A short-lived bright line from the muzzle to the impact point. */
+/** Stretch a pooled tracer box between muzzle and impact for a few frames. */
 export function spawnTracer(from, to) {
-  const slot = tracers.find((t) => t.life <= 0) || tracers[0];
-  const mesh = slot.mesh;
+  const slot = tracerPool.find((t) => t.life <= 0) || tracerPool[0];
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const dz = to.z - from.z;
-  const len = Math.max(0.1, Math.sqrt(dx * dx + dy * dy + dz * dz));
-  mesh.position.set((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
-  mesh.scale.set(1, 1, len);
-  mesh.lookAt(to.x, to.y, to.z);
-  mesh.visible = true;
-  mesh.material.opacity = 0.85;
+  const len = Math.max(0.1, Math.hypot(dx, dy, dz));
+  slot.mesh.position.set((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
+  slot.mesh.scale.set(1, 1, len);
+  slot.mesh.lookAt(to.x, to.y, to.z);
+  slot.mesh.visible = true;
+  slot.mesh.material.opacity = 0.85;
   slot.life = 0.07;
 }
 
-/** Flash the shared light + sprite at the gun muzzle. */
+/** Fire the shared flash light and sprite at the muzzle for one frame's worth. */
 export function muzzleFlash(x, y, z) {
   if (!flashLight) return;
   flashLight.position.set(x, y, z);
   flashLight.intensity = 60;
   flashSprite.position.set(x, y, z);
   flashSprite.material.opacity = 0.95;
-  flashTimer = 0.05;
+  flashLeft = 0.05;
 }
 
-/** Advance all effects by dt seconds. */
+/** Integrate particles, fade the flash and age the tracers. */
 export function updateEffects(dt) {
-  if (!points) return;
+  if (!cloud) return;
   for (let i = 0; i < MAX_PARTICLES; i += 1) {
-    const p = particles[i];
+    const p = pool[i];
     if (!p.alive) continue;
     p.life -= dt;
     if (p.life <= 0) {
@@ -156,21 +154,20 @@ export function updateEffects(dt) {
     positions[i * 3 + 1] = p.y;
     positions[i * 3 + 2] = p.z;
   }
-  points.geometry.attributes.position.needsUpdate = true;
-  points.geometry.attributes.color.needsUpdate = true;
+  cloud.geometry.attributes.position.needsUpdate = true;
+  cloud.geometry.attributes.color.needsUpdate = true;
 
-  if (flashTimer > 0) {
-    flashTimer -= dt;
-    if (flashTimer <= 0) {
+  if (flashLeft > 0) {
+    flashLeft -= dt;
+    if (flashLeft <= 0) {
       flashLight.intensity = 0;
       flashSprite.material.opacity = 0;
     }
   }
-  for (const t of tracers) {
-    if (t.life > 0) {
-      t.life -= dt;
-      t.mesh.material.opacity = Math.max(0, t.life / 0.07) * 0.85;
-      if (t.life <= 0) t.mesh.visible = false;
-    }
+  for (const t of tracerPool) {
+    if (t.life <= 0) continue;
+    t.life -= dt;
+    t.mesh.material.opacity = Math.max(0, t.life / 0.07) * 0.85;
+    if (t.life <= 0) t.mesh.visible = false;
   }
 }

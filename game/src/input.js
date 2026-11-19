@@ -1,37 +1,41 @@
-// input.js — keyboard and mouse state for the whole game. Systems poll `keys` and the
-// accumulated mouse movement each frame instead of juggling their own listeners, and
-// pointer lock is requested from here so the third-person camera can orbit freely.
+// input.js — raw keyboard and mouse state for the whole game.
+//
+// Systems poll this module instead of owning listeners: `keys` is a live map of
+// KeyboardEvent.code → held, mouse movement accumulates into `mouseDelta` for
+// whoever consumes it each frame, and clicks are latched as one-shot flags so a
+// punch or a shot fires exactly once per press. Pointer lock lives here too,
+// since the third-person camera is the only thing that needs it.
 
 export const keys = Object.create(null);
-/** Mouse movement accumulated since the last frame; main.js consumes and resets it. */
 export const mouseDelta = { x: 0, y: 0 };
 export let mouseDownLeft = false;
 export let mouseDownRight = false;
-/** Set true by a fresh left click; gameplay code clears it once handled. */
+/** Latched by a fresh left click; whichever system handles it clears it. */
 export let clickedLeft = false;
 
 let canvas = null;
-let onFirstGesture = null;
+let firstGestureHook = null;
 
-/** Attach all listeners. `element` receives pointer lock; `gestureHook` runs once. */
+function onGesture() {
+  if (firstGestureHook) {
+    firstGestureHook();
+    firstGestureHook = null;
+  }
+}
+
+/** Attach every listener. `element` is the canvas that takes pointer lock. */
 export function initInput(element, gestureHook) {
   canvas = element;
-  onFirstGesture = gestureHook || null;
+  firstGestureHook = gestureHook || null;
   window.addEventListener('keydown', (event) => {
     keys[event.code] = true;
-    if (onFirstGesture) {
-      onFirstGesture();
-      onFirstGesture = null;
-    }
+    onGesture();
   });
   window.addEventListener('keyup', (event) => {
     keys[event.code] = false;
   });
   window.addEventListener('mousedown', (event) => {
-    if (onFirstGesture) {
-      onFirstGesture();
-      onFirstGesture = null;
-    }
+    onGesture();
     if (event.button === 0) {
       mouseDownLeft = true;
       clickedLeft = true;
@@ -50,17 +54,16 @@ export function initInput(element, gestureHook) {
   });
   window.addEventListener('contextmenu', (event) => event.preventDefault());
   window.addEventListener('blur', () => {
+    // Never leave a key stuck down when the window loses focus mid-chase.
     for (const code of Object.keys(keys)) keys[code] = false;
     mouseDownLeft = false;
     mouseDownRight = false;
   });
 }
 
-/** Ask the browser for pointer lock on the game canvas (needs a user gesture). */
+/** Request pointer lock on the game canvas (needs a user gesture). */
 export function lockPointer() {
-  if (canvas && document.pointerLockElement !== canvas) {
-    canvas.requestPointerLock();
-  }
+  if (canvas && document.pointerLockElement !== canvas) canvas.requestPointerLock();
 }
 
 /** Release pointer lock, e.g. when a menu opens. */
@@ -72,7 +75,7 @@ export function isLocked() {
   return document.pointerLockElement === canvas;
 }
 
-/** Consume the accumulated mouse movement for this frame. */
+/** Consume the mouse movement accumulated since the last frame. */
 export function takeMouseDelta() {
   const out = { x: mouseDelta.x, y: mouseDelta.y };
   mouseDelta.x = 0;
@@ -80,7 +83,7 @@ export function takeMouseDelta() {
   return out;
 }
 
-/** Consume the fresh-click flag. */
+/** Consume the fresh-click latch. */
 export function takeClick() {
   const was = clickedLeft;
   clickedLeft = false;

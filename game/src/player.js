@@ -1,7 +1,10 @@
-// player.js — Marco Vale himself: the on-foot character and its animation, the
-// third-person camera (mouse orbit on foot, chase orbit in a car), getting in and
-// out of vehicles, and the punch. Combat with the pistol lives in combat.js; this
-// file owns everything about moving the man.
+// player.js — Marco Vale: the man, his walk, his camera and his car door.
+//
+// On foot he is the pedestrian figure in a red jacket and flat cap, animated by
+// the same limb rig as the crowd. Movement is camera-relative; the camera is a
+// mouse orbit that drifts behind a moving car. F enters and exits vehicles —
+// taking one that is not a mission car is grand theft auto, and the wanted
+// system hears about it. The punch lives here; the pistol lives in combat.js.
 
 import * as THREE from 'three';
 import { PLAYER, PLACES, CRIME } from './config.js';
@@ -16,10 +19,9 @@ let gunMesh = null;
 let enterCooldown = 0;
 let punchTimer = 0;
 
-/** Create Marco's mesh (red jacket, dark jeans) and his pistol prop. */
+/** Create Marco's mesh — red jacket, dark jeans, flat cap, holstered pistol prop. */
 export function initPlayer() {
   const mesh = buildPedMesh(0xc23b22, 0x232733, 0xd9a066);
-  // A flat cap so the player reads differently from the crowd.
   const cap = new THREE.Mesh(
     new THREE.BoxGeometry(0.3, 0.09, 0.3),
     new THREE.MeshLambertMaterial({ color: 0x1d2c3a }),
@@ -38,7 +40,7 @@ export function initPlayer() {
   placePlayer(PLACES.spawn.x, PLACES.spawn.z, 2.2);
 }
 
-/** Teleport the player (used by respawns and scene staging). */
+/** Teleport the player (respawns, continues and scene staging all land here). */
 export function placePlayer(x, z, heading = 0) {
   S.player.x = x;
   S.player.z = z;
@@ -47,7 +49,7 @@ export function placePlayer(x, z, heading = 0) {
   S.player.mesh.rotation.y = heading;
 }
 
-/** Enter the nearest usable car, or climb out of the current one. */
+/** F: climb into the nearest usable car, or out of the current one. */
 export function tryEnterExit() {
   const p = S.player;
   if (enterCooldown > 0) return;
@@ -56,7 +58,7 @@ export function tryEnterExit() {
     const v = p.inVehicle;
     p.inVehicle = null;
     v.parked = true;
-    // Step out on the left side of the car.
+    // Step out on the car's left side.
     const side = { x: Math.cos(v.heading), z: -Math.sin(v.heading) };
     const spot = collideCircle(v.x + side.x * 2.2, v.z + side.z * 2.2, PLAYER.radius);
     placePlayer(spot.x, spot.z, v.heading);
@@ -74,7 +76,6 @@ export function tryEnterExit() {
   }
   if (!best) return;
   if (!best.missionMark) {
-    // Taking a car that is not yours is a crime, worse if it says POLICE on it.
     S.addCrime(best.type === 'cruiser' ? CRIME.stealCar + 12 : CRIME.stealCar);
     if (best.ai && best.ai.role === 'traffic') S.notify('Vehicle stolen', 'bad');
   }
@@ -85,18 +86,16 @@ export function tryEnterExit() {
   S.cam.yaw = best.heading;
 }
 
-/** Where the camera wants to look from, given the mode and the mouse. */
+/** Orbit camera: mouse-steered on foot, chase-drift behind a moving car. */
 function updateCamera(dt) {
   const p = S.player;
   const cam = S.cam;
   const delta = takeMouseDelta();
   cam.yaw -= delta.x * 0.0026;
-  cam.pitch += delta.y * 0.0022;
-  cam.pitch = Math.max(-0.12, Math.min(1.05, cam.pitch));
+  cam.pitch = Math.max(-0.12, Math.min(1.05, cam.pitch + delta.y * 0.0022));
   const inCar = Boolean(p.inVehicle);
   const targetDist = inCar ? 11.5 : 7.2;
   cam.distance += (targetDist - cam.distance) * Math.min(1, dt * 4);
-  // In a moving car with no mouse input, drift round behind it.
   if (inCar && Math.abs(p.inVehicle.speed) > 5 && delta.x === 0) {
     let diff = p.inVehicle.heading - cam.yaw;
     while (diff > Math.PI) diff -= Math.PI * 2;
@@ -106,19 +105,16 @@ function updateCamera(dt) {
   const focus = inCar
     ? { x: p.inVehicle.x, y: 1.5, z: p.inVehicle.z }
     : { x: p.x, y: 1.55, z: p.z };
-  const back = {
-    x: Math.sin(cam.yaw) * Math.cos(cam.pitch),
-    z: Math.cos(cam.yaw) * Math.cos(cam.pitch),
-  };
-  cam.x = focus.x - back.x * cam.distance;
-  cam.z = focus.z - back.z * cam.distance;
-  cam.y = focus.y + Math.sin(cam.pitch) * cam.distance + 0.6;
-  if (cam.y < 0.7) cam.y = 0.7;
+  const backX = Math.sin(cam.yaw) * Math.cos(cam.pitch);
+  const backZ = Math.cos(cam.yaw) * Math.cos(cam.pitch);
+  cam.x = focus.x - backX * cam.distance;
+  cam.z = focus.z - backZ * cam.distance;
+  cam.y = Math.max(0.7, focus.y + Math.sin(cam.pitch) * cam.distance + 0.6);
   S.camera.position.set(cam.x, cam.y, cam.z);
   S.camera.lookAt(focus.x, focus.y + 0.4, focus.z);
 }
 
-/** The punch: a short-range swing that connects with the nearest person ahead. */
+/** A short-range swing at the nearest person standing in front of Marco. */
 function tryPunch() {
   const p = S.player;
   if (p.punchCooldown > 0 || p.gunDrawn) return;
@@ -139,7 +135,7 @@ function tryPunch() {
   }
 }
 
-/** Advance the player (and the driven car) one frame. */
+/** Advance the player one frame: drive the car, or walk the man and pose him. */
 export function updatePlayer(dt) {
   const p = S.player;
   enterCooldown = Math.max(0, enterCooldown - dt);
@@ -162,8 +158,8 @@ export function updatePlayer(dt) {
     p.heading = v.heading;
     p.speed = Math.abs(v.speed);
   } else {
-    // Movement is relative to where the camera looks: the view direction is
-    // (sin yaw, cos yaw) and screen-right is (-cos yaw, sin yaw).
+    // Camera-relative movement: view forward is (sin yaw, cos yaw) and
+    // screen-right is (-cos yaw, sin yaw).
     const yaw = S.cam.yaw;
     const fwd = { x: Math.sin(yaw), z: Math.cos(yaw) };
     const right = { x: -Math.cos(yaw), z: Math.sin(yaw) };
@@ -174,16 +170,14 @@ export function updatePlayer(dt) {
     if (keys.KeyD || keys.ArrowRight) { mx += right.x; mz += right.z; }
     if (keys.KeyA || keys.ArrowLeft) { mx -= right.x; mz -= right.z; }
     const len = Math.hypot(mx, mz);
-    const sprinting = keys.ShiftLeft || keys.ShiftRight;
     if (len > 0.01) {
       mx /= len;
       mz /= len;
-      const speed = sprinting ? PLAYER.sprintSpeed : PLAYER.walkSpeed;
+      const speed = keys.ShiftLeft || keys.ShiftRight ? PLAYER.sprintSpeed : PLAYER.walkSpeed;
       p.speed = speed;
       p.x += mx * speed * dt;
       p.z += mz * speed * dt;
-      const targetHeading = Math.atan2(mx, mz);
-      let diff = targetHeading - p.heading;
+      let diff = Math.atan2(mx, mz) - p.heading;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
       p.heading += diff * Math.min(1, dt * 11);
@@ -197,7 +191,7 @@ export function updatePlayer(dt) {
     const clamped = clampToWorld(p.x, p.z);
     p.x = clamped.x;
     p.z = clamped.z;
-    // Animate the figure.
+
     const u = p.mesh.userData;
     const swing = Math.sin(p.walkPhase) * Math.min(0.6, p.speed * 0.09);
     u.legL.rotation.x = swing;
@@ -215,7 +209,7 @@ export function updatePlayer(dt) {
     const onPier = p.x > 356 && Math.abs(p.z - PLACES.pierEnd.z) < 15;
     p.mesh.position.set(p.x, onPier ? 1.05 : 0, p.z);
     p.mesh.rotation.y = p.heading;
-    // Clicks punch only with the gun away; combat.js takes them when it is drawn.
+    // Clicks punch only while the gun is away; combat.js owns them otherwise.
     if (!p.gunDrawn && takeClick()) tryPunch();
   }
 

@@ -1,27 +1,28 @@
-// textures.js — every texture in Solano Heat is painted on a canvas at boot: asphalt
-// with lane paint, sun-bleached pavement, lit building facades, palm fronds, sand,
-// harbour water and crate wood. No image files are loaded, which keeps the game fully
-// offline and the file count tiny.
+// textures.js — every surface in Port Solano is painted, not loaded.
+//
+// Asphalt with lane paint, sun-bleached pavement, lit facades, palm fronds, sand,
+// harbour water, crate wood, the sunset sky: all of it is drawn onto canvases at
+// boot and wrapped as THREE.CanvasTextures. The game ships zero image files,
+// which keeps it fully offline and the entry small.
 
 import * as THREE from 'three';
 import { makeRng } from './random.js';
 
-function canvasTexture(width, height, painter, repeatX = 1, repeatY = 1) {
+/** Paint a canvas with `painter` and wrap it as a repeating SRGB texture. */
+function canvasTexture(width, height, painter) {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  painter(ctx, width, height);
+  painter(canvas.getContext('2d'), width, height);
   const texture = new THREE.CanvasTexture(canvas);
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
-  texture.repeat.set(repeatX, repeatY);
   texture.anisotropy = 4;
   texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
 
-/** Speckle noise over a base colour, the cheapest way to make flat fills feel real. */
+/** Fill with `base`, then scatter `count` translucent flecks over the top. */
 function speckle(ctx, width, height, rng, base, flecks, count, alpha) {
   ctx.fillStyle = base;
   ctx.fillRect(0, 0, width, height);
@@ -34,15 +35,14 @@ function speckle(ctx, width, height, rng, base, flecks, count, alpha) {
 }
 
 /**
- * One road tile: sidewalks on both edges, asphalt in the middle, a dashed centre line.
- * The tile is drawn so it repeats along the road's length (the V axis).
+ * One road tile, drawn to repeat along the road's length (the V axis):
+ * sidewalks at both edges, a speckled asphalt band between pale curbs, and one
+ * dashed centre line per tile.
  */
 export function makeRoadTexture() {
   const rng = makeRng(41);
   return canvasTexture(256, 256, (ctx, w, h) => {
-    // Sidewalks across the whole tile first.
     speckle(ctx, w, h, rng, '#b8ab98', ['#a89a85', '#c9bca6', '#9c8d76'], 500, 0.25);
-    // Asphalt band in the middle 60%, speckled inside a clip so it stays off the walks.
     const x0 = w * 0.2;
     const x1 = w * 0.8;
     ctx.save();
@@ -52,14 +52,11 @@ export function makeRoadTexture() {
     ctx.translate(x0, 0);
     speckle(ctx, x1 - x0, h, rng, '#3c3f45', ['#33363c', '#484b52', '#2e3036'], 1200, 0.35);
     ctx.restore();
-    // Curb lines.
     ctx.fillStyle = '#e8e2d4';
     ctx.fillRect(x0 - 3, 0, 3, h);
     ctx.fillRect(x1, 0, 3, h);
-    // Centre dashes.
     ctx.fillStyle = '#f7c948';
     ctx.fillRect(w / 2 - 2, 10, 4, 70);
-    // Sidewalk joints.
     ctx.strokeStyle = 'rgba(90,80,66,0.5)';
     ctx.lineWidth = 2;
     for (const x of [w * 0.1, w * 0.9]) {
@@ -77,7 +74,7 @@ export function makeRoadTexture() {
   });
 }
 
-/** Plain city-block ground: warm concrete with expansion joints. */
+/** City-block ground: warm concrete with expansion joints. */
 export function makePavementTexture() {
   const rng = makeRng(97);
   return canvasTexture(256, 256, (ctx, w, h) => {
@@ -94,7 +91,7 @@ export function makePavementTexture() {
   });
 }
 
-/** Beach sand with soft ripples. */
+/** Beach sand with soft wind ripples. */
 export function makeSandTexture() {
   const rng = makeRng(7);
   return canvasTexture(256, 256, (ctx, w, h) => {
@@ -109,7 +106,7 @@ export function makeSandTexture() {
   });
 }
 
-/** Harbour water: deep teal with lighter wave streaks; the offset scrolls at runtime. */
+/** Harbour water: deep teal with wave streaks. world.js scrolls the offset. */
 export function makeWaterTexture() {
   const rng = makeRng(23);
   return canvasTexture(256, 256, (ctx, w, h) => {
@@ -129,8 +126,8 @@ export function makeWaterTexture() {
 }
 
 /**
- * A building facade: coloured render with a grid of windows, some of them lit by the
- * evening sun. `variant` picks the palette so the skyline does not repeat itself.
+ * A building facade: tinted render with a grid of windows, a third of them lit.
+ * `variant` seeds a different window rhythm so the skyline never obviously tiles.
  */
 export function makeFacadeTexture(variant, baseColor) {
   const rng = makeRng(1000 + variant * 131);
@@ -149,7 +146,6 @@ export function makeFacadeTexture(variant, baseColor) {
         ctx.fillRect(c * winW + 5, r * winH + 6, winW - 10, 3);
       }
     }
-    // Awnings / shop band at street level for low variants.
     if (variant % 2 === 0) {
       ctx.fillStyle = 'rgba(146,64,44,0.85)';
       ctx.fillRect(0, h - winH * 1.4, w, winH * 0.5);
@@ -157,7 +153,7 @@ export function makeFacadeTexture(variant, baseColor) {
   });
 }
 
-/** Palm frond: one long tapered leaf drawn with alpha, used on crossed planes. */
+/** One palm frond: a tapered leaf with barbs, drawn with alpha for crossed planes. */
 export function makeFrondTexture() {
   return canvasTexture(128, 128, (ctx, w, h) => {
     ctx.clearRect(0, 0, w, h);
@@ -181,7 +177,7 @@ export function makeFrondTexture() {
   });
 }
 
-/** Weathered crate wood with a stencilled edge. */
+/** Weathered crate wood with a stencilled frame and diagonal brace. */
 export function makeCrateTexture() {
   const rng = makeRng(55);
   return canvasTexture(128, 128, (ctx, w, h) => {
@@ -199,7 +195,7 @@ export function makeCrateTexture() {
   });
 }
 
-/** Soft radial glow sprite, used for lamps, the sun glare and muzzle flashes. */
+/** A soft radial glow, clamped at the edges: lamps, sun glare, muzzle flash. */
 export function makeGlowTexture() {
   const texture = canvasTexture(128, 128, (ctx, w, h) => {
     const grad = ctx.createRadialGradient(w / 2, h / 2, 2, w / 2, h / 2, w / 2);
@@ -214,7 +210,7 @@ export function makeGlowTexture() {
   return texture;
 }
 
-/** The sunset sky: a vertical gradient from deep blue to hot orange at the horizon. */
+/** The sunset sky dome: deep blue up top melting to hot orange at the horizon. */
 export function makeSkyTexture() {
   const texture = canvasTexture(64, 512, (ctx, w, h) => {
     const grad = ctx.createLinearGradient(0, 0, 0, h);

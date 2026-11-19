@@ -1,8 +1,10 @@
-// scenes.js — the screenshot scenes behind ?scene=downtown|chase|harbor|mission.
-// Each one stages the real game (same city, same systems) into a photogenic moment
-// and flies a slow cinematic camera, so the maker's screenshots are honest renders
-// of gameplay: a police chase with the wanted stars lit, a harbour sunset, a job
-// in progress with its beacon on the minimap.
+// scenes.js — the staged moments behind ?scene=chase|downtown|harbor|mission.
+//
+// Each scene drops the real game — same city, same systems, same HUD — into a
+// photogenic instant and flies a cinematic camera, so the entry's screenshots
+// are honest renders of gameplay rather than mock-ups: a three-star chase down
+// the east–west avenue, Marco idling at the central junction, the boat waiting
+// at the pier, and a delivery run in progress with Lola on the radio.
 
 import { PLACES } from './config.js';
 import { S } from './state.js';
@@ -24,34 +26,39 @@ function putPlayerIn(car) {
   S.player.z = car.z;
 }
 
-/** Stage the named scene. Called once by main.js after the world exists. */
+/** Stage the named scene. Called once by main.js, after the world exists. */
 export function stageScene(name) {
   S.sceneMode = true;
-  S.sceneName = name;
   S.mode = 'scene';
   if (name === 'chase') {
+    // The cover: an orange sedan at speed on the z = −27 avenue, three
+    // cruisers on its tail, three stars lit, the boat set as the escape point.
     const car = spawnVehicle('sedan', 0xd94f30, -30, -23.6, Math.PI / 2, {});
     putPlayerIn(car);
     car.speed = 17;
     driveTarget = { x: 400, z: -23.6 };
     for (let i = 0; i < 3; i += 1) {
-      const cop = spawnVehicle('cruiser', 0x23262b, -42 - i * 12, -32 + i * 5, Math.PI / 2, {
-        ai: { role: 'police', reverseTimer: 0, wreckTimer: 0 },
+      const cop = spawnVehicle('cruiser', 0x23262b, -44 - i * 12, -31 + i * 4.5, Math.PI / 2, {
+        ai: { role: 'police', wreckTimer: 0 },
       });
-      cop.speed = 15;
+      cop.speed = 15.5;
     }
     setWantedStars(3);
-    S.wanted.lastSeenAt = 99999; // the chase does not cool off during the shot
+    S.wanted.lastSeenAt = 99999; // the chase never cools off during the shot
     S.objective = { x: PLACES.boat.x, z: PLACES.boat.z, label: 'Escape' };
     S.objectiveText = "Shake the PSPD — make it to Lola's boat";
     anchor = { x: car.x, z: car.z };
+    S.sceneName = 'chase';
   } else if (name === 'harbor') {
+    // Marco on the pier boards, the boat riding at anchor just past him.
     placePlayer(378, 208, Math.PI / 2);
     S.cam.yaw = Math.PI / 2;
-    anchor = { x: 424, z: PLACES.boat.z }; // the boat mesh rides just past the pier-end marker
+    anchor = { x: 424, z: PLACES.boat.z };
     S.objective = { x: PLACES.boat.x, z: PLACES.boat.z, label: 'The Boat' };
     S.objectiveText = 'Escape to the boat';
+    S.sceneName = 'harbor';
   } else if (name === 'mission') {
+    // A delivery in progress: blue sedan eastbound, package aboard, Lola talking.
     const car = spawnVehicle('sedan', 0x2f6db8, 120, -239.6, Math.PI / 2, {});
     putPlayerIn(car);
     car.speed = 14;
@@ -66,49 +73,50 @@ export function stageScene(name) {
       onDone: null,
     };
     anchor = { x: car.x, z: car.z };
+    S.sceneName = 'mission';
   } else {
     // downtown (and any unknown name): Marco on foot at the central junction.
-    name = 'downtown';
-    S.sceneName = 'downtown';
     placePlayer(27, 27, 2.4);
     S.cam.yaw = 2.4;
     anchor = { x: 27, z: 27 };
     S.cash = 250;
+    S.sceneName = 'downtown';
   }
 }
 
-/** Per-frame scene work: drive the staged car, then fly the cinematic camera. */
+/** Per-frame scene work: drive the staged car, then fly the camera. */
 export function updateScene(dt) {
   orbitAngle += dt * 0.07;
-  const p = S.playerPos();
   if (driveTarget && S.player.inVehicle) {
     const car = S.player.inVehicle;
     steerToward(car, driveTarget.x, driveTarget.z, dt, 1.2);
     approachSpeed(car, 16, dt);
     anchor = { x: car.x, z: car.z };
-    // Camera: a slow swing from rear three-quarter to front three-quarter.
-    const swing = Math.sin(S.time * 0.16) * 0.6;
-    const back = car.heading + Math.PI + swing;
-    const dist = 14.5;
+    // A tracking shot from the FRONT three-quarter, looking back at the car:
+    // the sedan charges at the lens and the cruisers on its tail stay in the
+    // same frame behind it, the city streaming past all of them.
+    const swing = Math.sin(S.time * 0.16) * 0.5;
+    const front = car.heading + swing;
+    const dist = 14;
     S.camera.position.set(
-      car.x - Math.sin(back) * -dist * Math.cos(0.12),
-      5.8,
-      car.z - Math.cos(back) * -dist * Math.cos(0.12),
+      car.x + Math.sin(front) * dist,
+      4.6,
+      car.z + Math.cos(front) * dist,
     );
-    S.camera.lookAt(car.x + Math.sin(car.heading) * 3, 1.2, car.z + Math.cos(car.heading) * 3);
+    S.camera.lookAt(
+      car.x - Math.sin(car.heading) * 3,
+      1.1,
+      car.z - Math.cos(car.heading) * 3,
+    );
     return;
   }
-  // Orbiting shots: downtown and harbour.
-  const radius = S.sceneName === 'harbor' ? 17 : 13;
-  const height = S.sceneName === 'harbor' ? 3.4 : 4.6;
+  // Orbiting shots for downtown and the harbour.
+  const radius = S.sceneName === 'harbor' ? 17 : 8.5;
+  const height = S.sceneName === 'harbor' ? 3.4 : 3.2;
   S.camera.position.set(
     anchor.x + Math.sin(orbitAngle) * radius,
     height,
     anchor.z + Math.cos(orbitAngle) * radius,
   );
   S.camera.lookAt(anchor.x, 1.6, anchor.z);
-  if (S.sceneName === 'downtown') {
-    // Marco idles in frame; keep him near the anchor.
-    S.player.mesh.position.set(p.x, 0, p.z);
-  }
 }

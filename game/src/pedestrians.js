@@ -1,6 +1,10 @@
-// pedestrians.js — the people of Port Solano. Each pedestrian is a small articulated
-// figure built from boxes (swinging arms and legs, no model files) who strolls the
-// sidewalks, panics and runs from gunfire and reckless cars, and can be knocked down.
+// pedestrians.js — the people of Port Solano.
+//
+// Each pedestrian is a small articulated figure of boxes — swinging arms and
+// legs, no model files — who strolls the sidewalks between random destinations,
+// panics and runs when violence happens nearby, and can be knocked down by
+// fists, bullets and bumpers. The downed recover and flee; the dead are quietly
+// replaced across town so the city never empties.
 
 import * as THREE from 'three';
 import { CRIME } from './config.js';
@@ -22,7 +26,7 @@ armGeo.translate(0, -0.3, 0);
 const torsoGeo = new THREE.BoxGeometry(0.46, 0.62, 0.24);
 const headGeo = new THREE.BoxGeometry(0.26, 0.3, 0.26);
 
-/** Build one articulated pedestrian figure; limb pivots land in userData. */
+/** Build one articulated figure; the limb pivots land in userData for animation. */
 export function buildPedMesh(shirt, pants, skin) {
   const group = new THREE.Group();
   const shirtMat = new THREE.MeshLambertMaterial({ color: shirt });
@@ -50,9 +54,8 @@ export function buildPedMesh(shirt, pants, skin) {
 
 /** A random point on a sidewalk somewhere in the city. */
 function randomSidewalkPoint() {
-  const centers = S.roadCenters;
   const vertical = rng() < 0.5;
-  const coord = pick(rng, centers);
+  const coord = pick(rng, S.roadCenters);
   const side = rng() < 0.5 ? -8.9 : 8.9;
   const along = randRange(rng, -315, 315);
   return vertical ? { x: coord + side, z: along } : { x: along, z: coord + side };
@@ -68,7 +71,7 @@ function spawnPed(at) {
     heading: rng() * Math.PI * 2,
     speed: 0,
     health: 100,
-    state: 'walk',
+    state: 'walk', // 'walk' | 'flee' | 'down'
     target: randomSidewalkPoint(),
     walkPhase: rng() * 6,
     fleeTimer: 0,
@@ -86,7 +89,7 @@ export function initPedestrians() {
   for (let i = 0; i < PED_COUNT; i += 1) spawnPed(randomSidewalkPoint());
 }
 
-/** Everyone within `radius` of a scary event runs from it. */
+/** Everyone within `radius` of a frightening event runs directly away from it. */
 export function panicAt(x, z, radius = 26) {
   for (const ped of S.peds) {
     if (ped.dead || ped.state === 'down') continue;
@@ -98,17 +101,21 @@ export function panicAt(x, z, radius = 26) {
   }
 }
 
-/** A car (or a fist) connects with a pedestrian. */
-export function hitPedestrian(ped, source) {
-  if (ped.dead || ped.state === 'down') return;
-  const speed = source && source.speed !== undefined ? Math.abs(source.speed) : 4;
-  ped.health -= 34 + speed * 4;
+function knockDown(ped, recoverySeconds) {
   ped.state = 'down';
-  ped.downTimer = ped.health <= 0 ? 999 : randRange(rng, 1.6, 2.8);
+  ped.downTimer = ped.health <= 0 ? 999 : recoverySeconds;
   if (ped.health <= 0) {
     ped.dead = true;
     ped.deadTimer = 24;
   }
+}
+
+/** A car connects with a pedestrian. The player's car makes it the player's crime. */
+export function hitPedestrian(ped, source) {
+  if (ped.dead || ped.state === 'down') return;
+  const speed = source && source.speed !== undefined ? Math.abs(source.speed) : 4;
+  ped.health -= 34 + speed * 4;
+  knockDown(ped, randRange(rng, 1.6, 2.8));
   if (source && source === S.player.inVehicle) {
     S.addCrime(CRIME.hitPedestrian);
     S.notify('You hit a pedestrian!', 'bad');
@@ -121,17 +128,12 @@ export function punchPedestrian(ped) {
   if (ped.dead) return;
   playPunch();
   ped.health -= 34;
-  ped.state = 'down';
-  ped.downTimer = ped.health <= 0 ? 999 : 1.4;
-  if (ped.health <= 0) {
-    ped.dead = true;
-    ped.deadTimer = 24;
-  }
+  knockDown(ped, 1.4);
   S.addCrime(CRIME.punchPerson);
   panicAt(ped.x, ped.z, 16);
 }
 
-/** Damage from gunfire (combat.js resolves the shot, this applies it). */
+/** Gunfire damage (combat.js resolves the shot; this applies the consequence). */
 export function shootPedestrian(ped, damage) {
   if (ped.dead) return;
   ped.health -= damage;
@@ -148,6 +150,7 @@ export function shootPedestrian(ped, damage) {
   panicAt(ped.x, ped.z, 22);
 }
 
+/** Pose one figure for this frame: walk swing, flee flail, or flat on the ground. */
 function animatePed(ped, dt) {
   const u = ped.mesh.userData;
   if (ped.state === 'down') {
@@ -160,20 +163,24 @@ function animatePed(ped, dt) {
   const swing = Math.sin(ped.walkPhase) * Math.min(0.65, ped.speed * 0.16);
   u.legL.rotation.x = swing;
   u.legR.rotation.x = -swing;
-  u.armL.rotation.x = ped.state === 'flee' ? -2.6 + Math.sin(ped.walkPhase * 1.4) * 0.3 : -swing * 0.8;
-  u.armR.rotation.x = ped.state === 'flee' ? -2.6 - Math.sin(ped.walkPhase * 1.4) * 0.3 : swing * 0.8;
+  if (ped.state === 'flee') {
+    u.armL.rotation.x = -2.6 + Math.sin(ped.walkPhase * 1.4) * 0.3;
+    u.armR.rotation.x = -2.6 - Math.sin(ped.walkPhase * 1.4) * 0.3;
+  } else {
+    u.armL.rotation.x = -swing * 0.8;
+    u.armR.rotation.x = swing * 0.8;
+  }
   ped.mesh.position.set(ped.x, 0, ped.z);
   ped.mesh.rotation.y = ped.heading;
 }
 
-/** Advance every pedestrian one frame. */
+/** Advance every pedestrian: respawn the dead, recover the downed, walk or flee. */
 export function updatePedestrians(dt) {
   for (const ped of S.peds) {
     if (ped.dead) {
       ped.deadTimer -= dt;
       animatePed(ped, dt);
       if (ped.deadTimer <= 0) {
-        // Quietly replaced across town; the city never empties.
         const at = randomSidewalkPoint();
         ped.x = at.x;
         ped.z = at.z;
@@ -212,8 +219,7 @@ export function updatePedestrians(dt) {
       tz = ped.target.z;
       if (Math.hypot(tx - ped.x, tz - ped.z) < 2.4) ped.target = randomSidewalkPoint();
     }
-    const targetHeading = Math.atan2(tx - ped.x, tz - ped.z);
-    let diff = targetHeading - ped.heading;
+    let diff = Math.atan2(tx - ped.x, tz - ped.z) - ped.heading;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
     ped.heading += Math.max(-3.2 * dt, Math.min(3.2 * dt, diff));

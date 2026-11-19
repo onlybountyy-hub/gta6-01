@@ -1,10 +1,13 @@
-// state.js — the single shared game-state object. Every system (world, traffic, police,
-// missions, HUD) reads and writes through this singleton instead of importing each
-// other, which keeps the module graph free of cycles. main.js creates the Three.js
-// objects and parks them here; the rest of the game treats this as its blackboard.
+// state.js — the shared blackboard every system reads and writes.
+//
+// Instead of modules importing each other in circles, they all import this one
+// singleton. main.js creates the Three.js renderer, scene and camera and parks
+// them here; world.js registers the colliders it builds; the player, vehicles,
+// pedestrians, wanted level, cash and story progress all live here too. If a
+// system needs to know something, it looks on the board.
 
 export const S = {
-  // Three.js handles, filled in by main.js.
+  // Three.js handles, assigned by main.js during boot.
   renderer: null,
   scene: null,
   camera: null,
@@ -14,22 +17,27 @@ export const S = {
 
   /** 'menu' | 'playing' | 'paused' | 'dialogue' | 'busted' | 'wasted' | 'scene' */
   mode: 'menu',
-  /** True while a ?scene= screenshot scene is staged (no menus, cinematic camera). */
+  /** True while a ?scene= screenshot scene is staged. */
   sceneMode: false,
   sceneName: '',
+  /** Seconds since boot; every timer in the game reads this clock. */
   time: 0,
+  /** The one seed the whole city is generated from. */
   seed: 20261119,
+  /** Set by police.js when the bust meter fills; main.js stages the arrest. */
+  busted: false,
 
-  // World data, filled in by world.js.
-  colliders: [], // building AABBs: {minX, maxX, minZ, maxZ}
+  // World data, filled in by buildWorld().
+  colliders: [], // {minX, maxX, minZ, maxZ} per building, {pier: true, ...} for the pier
   roadCenters: [],
+  parkingSpots: [],
 
-  // The player character (player.js owns the numbers, the mesh lives in the scene).
+  // The player character. player.js owns the behaviour; the numbers live here.
   player: {
     mesh: null,
     x: 0,
     z: 0,
-    heading: 0, // facing angle, forward = (sin, cos)
+    heading: 0, // radians; forward is (sin(heading), cos(heading))
     speed: 0,
     health: 100,
     lastDamageAt: -99,
@@ -40,55 +48,51 @@ export const S = {
     dead: false,
   },
 
-  // Camera orbit, driven by the mouse through input.js.
+  // Camera orbit state, steered by the mouse through input.js.
   cam: { yaw: 0.6, pitch: 0.32, distance: 7.5, x: 0, y: 3, z: 0 },
 
-  // Entities. Vehicle objects are shared by traffic, police and the player.
-  vehicles: [], // {mesh, type, x, z, heading, speed, ai, health, ...}
+  // Live entities. Vehicle records are shared by traffic, police and the player.
+  vehicles: [], // {mesh, type, spec, x, z, heading, speed, ai, health, ...}
   peds: [], // {mesh, x, z, heading, state, health, ...}
 
-  // Wanted / police state (police.js).
+  // Wanted state, owned by police.js.
   wanted: {
     heat: 0,
     stars: 0,
-    lastSeenAt: -99, // S.time when a police unit last had eyes on the player
-    bustProgress: 0, // 0..1
-    unseenTimer: 0,
+    lastSeenAt: -99, // S.time of the last moment a cruiser had eyes on the player
+    bustProgress: 0, // 0..1, fills while boxed in at low speed
   },
 
-  // Economy and story progress.
   cash: 250,
   storyComplete: false,
 
-  // Current objective marker: {x, z, label} or null (missions.js, hud.js).
+  // The current objective marker {x, z, label} and its HUD line (missions.js).
   objective: null,
   objectiveText: '',
 
-  // One-shot UI events for hud.js: notifications pushed by gameplay systems.
+  // Toast queue for hud.js; gameplay pushes, the HUD renders and ages them out.
   notifications: [],
 
-  /** Add heat for a crime and let police.js recompute the star level. */
+  /** Commit a crime: heat rises now, police.js derives the stars from it. */
   addCrime(points) {
     S.wanted.heat = Math.min(220, S.wanted.heat + points);
   },
 
-  /** Queue a toast line for the HUD. */
+  /** Queue a HUD toast ('info' | 'good' | 'bad'). */
   notify(text, kind = 'info') {
     S.notifications.push({ text, kind, at: S.time });
     if (S.notifications.length > 5) S.notifications.shift();
   },
 
-  /** Where the player effectively is: in the driven car, or on foot. */
+  /** The player's effective position: the driven car's, when driving. */
   playerPos() {
     const v = S.player.inVehicle;
-    if (v) return { x: v.x, z: v.z };
-    return { x: S.player.x, z: S.player.z };
+    return v ? { x: v.x, z: v.z } : { x: S.player.x, z: S.player.z };
   },
 
-  /** How fast the player is moving, on foot or in the driven car. */
+  /** The player's effective speed, on foot or behind the wheel. */
   playerSpeed() {
     const v = S.player.inVehicle;
-    if (v) return Math.abs(v.speed);
-    return S.player.speed;
+    return v ? Math.abs(v.speed) : S.player.speed;
   },
 };
